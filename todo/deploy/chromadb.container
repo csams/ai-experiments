@@ -1,0 +1,17 @@
+[Unit]
+Description=ChromaDB vector store for Todo task tracker
+After=todo-network.service
+
+[Container]
+Image=ghcr.io/chroma-core/chroma:latest
+ContainerName=todo-chromadb
+Network=todo.network
+Volume=todo-chromadata.volume:/chroma/chroma
+PublishPort=8000:8000
+
+[Service]
+Restart=always
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target default.target

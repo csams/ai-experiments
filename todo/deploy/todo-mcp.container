@@ -1,0 +1,21 @@
+[Unit]
+Description=Todo MCP server
+After=postgres.service chromadb.service
+Requires=postgres.service chromadb.service
+
+[Container]
+Image=localhost/todo:latest
+ContainerName=todo-mcp
+Network=todo.network
+Exec=mcp --transport http --addr :8080
+Environment=TODO_CONFIG=/etc/todo/config.yaml
+Volume=%h/.config/todo/production.yaml:/etc/todo/config.yaml:ro,Z
+Secret=todo-pg-password,type=env,target=PGPASSWORD
+PublishPort=8080:8080
+
+[Service]
+Restart=always
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target default.target

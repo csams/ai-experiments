@@ -1,0 +1,32 @@
+db:
+  driver: postgres
+  postgres:
+    host: postgres
+    port: 5432
+    dbname: todo
+    user: todo
+    password: ""  # set via PGPASSWORD env var or mounted secret
+    sslmode: disable
+
+vector:
+  enabled: true
+  embedder: ollama
+  store: chromadb
+  ollama:
+    model: nomic-embed-text
+    url: http://host.containers.internal:11434
+  chromadb:
+    url: http://chromadb:8000
+    collection: todo
+    tenant: default_tenant
+    database: default_database
+
+logging:
+  level: info
+  format: json
+  output: stderr
+  audit: true
+
+mcp:
+  transport: http
+  addr: ":8080"
