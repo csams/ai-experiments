@@ -1,5 +1,5 @@
 # Build stage
-FROM docker.io/library/golang:1.26 AS builder
+FROM docker.io/library/golang:1.26.1 AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -7,6 +7,6 @@ COPY . .
 RUN go build -o todo .
 
 # Runtime stage
-FROM registry.access.redhat.com/ubi9-micro:latest
+FROM registry.access.redhat.com/ubi9-micro:9.6
 COPY --from=builder /app/todo /usr/local/bin/todo
 ENTRYPOINT ["todo"]

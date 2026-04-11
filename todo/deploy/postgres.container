@@ -3,7 +3,7 @@ Description=PostgreSQL for Todo task tracker
 After=todo-network.service
 
 [Container]
-Image=docker.io/library/postgres:16
+Image=docker.io/library/postgres:16.13
 ContainerName=todo-postgres
 Network=todo.network
 Environment=POSTGRES_DB=todo

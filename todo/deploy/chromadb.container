@@ -3,7 +3,7 @@ Description=ChromaDB vector store for Todo task tracker
 After=todo-network.service
 
 [Container]
-Image=ghcr.io/chroma-core/chroma:latest
+Image=ghcr.io/chroma-core/chroma:1.5.7
 ContainerName=todo-chromadb
 Network=todo.network
 Volume=todo-chromadata.volume:/chroma/chroma
