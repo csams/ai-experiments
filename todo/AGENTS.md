@@ -3,11 +3,11 @@
 ## Build & Run
 
 ```bash
-# Build
-go build -o todo .
-
-# Run tests
-go test ./... -count=1
+# Build, lint, and test (via Makefile)
+make build  # go build -o todo .
+make test   # go test ./... -count=1
+make lint   # golangci-lint run ./...
+make all    # lint + test + build
 
 # Run with default SQLite DB (~/.todo.db)
 ./todo task list
@@ -40,7 +40,7 @@ deploy/          # Systemd quadlet files and production config
 
 ## Key Interfaces
 
-- **`store.Store`** — 26-method interface for all task operations. Implemented by `gormstore.GormStore`.
+- **`store.Store`** — 27-method interface for all task operations. Implemented by `gormstore.GormStore`.
 - **`store.StoreObserver`** — receives `StoreEvent` after mutations. Used by `audit.Logger` and `synced.VectorSyncer`.
 - **`store.SemanticSearcher`** — vector similarity search. Implemented by `synced.VectorSyncer`.
 - **`embed.Embedder`** — generates vector embeddings. Implementations: `ollama.Embedder`, `openai.Embedder`.
@@ -73,9 +73,9 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (27 core + 2 optional semantic)
+### Available MCP Tools (26 core + 2 optional semantic)
 
-**Tasks:** `create_task`, `list_tasks`, `get_task`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
+**Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
 
 **Notes:** `add_note`, `update_note`, `list_notes`, `delete_note`
 
@@ -85,9 +85,9 @@ Add to your MCP settings:
 
 **Bulk:** `bulk_update_state`, `bulk_update_priority`, `bulk_add_tags`, `bulk_remove_tags`
 
-**Search:** `search_tasks`, `search_notes`
-
 **Semantic (when vector enabled):** `semantic_search`, `semantic_search_context`
+
+Semantic search excludes archived items by default. Pass `include_archived: true` (MCP) or `--include-archived` (CLI) to include them.
 
 ## Task States
 
@@ -104,6 +104,16 @@ A task can be `Blocked` (via `add_blockers`) or `Unblocked` (auto-transition whe
 Lower number = higher importance. P0 > P1 > P2. Negative priorities are valid.
 
 Blockers are automatically promoted to at least match the priority of tasks they block.
+
+## Validation Rules
+
+- **Title**: required, max 512 characters
+- **Description**: optional, no length limit
+- **Tags**: alphanumeric, hyphens, and underscores only (`[a-zA-Z0-9_-]+`), max 100 chars per tag, max 50 tags per task
+- **Notes**: required non-empty text, no length limit
+- **Links**: URL required, max 2000 characters
+- **Search queries**: max 500 characters
+- **Bulk operations**: max 100 IDs per call
 
 ## Subtask Hierarchy
 
@@ -128,6 +138,7 @@ vector:
   chromadb:
     url: http://localhost:8000
     collection: todo
+    auth_token: ""  # optional; set via TODO_VECTOR_CHROMADB_AUTH_TOKEN
 ```
 
 Requires Ollama and ChromaDB running. Use `todo vector reindex` to build/rebuild the index.

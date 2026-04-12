@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/csams/todo/audit"
 	"github.com/csams/todo/config"
@@ -73,7 +74,10 @@ func Execute() error {
 func openStore() (store.Store, *gormstore.GormStore, error) {
 	dsn := cfg.DB.DSN
 	if strings.HasPrefix(dsn, "~/") {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolving home directory: %w", err)
+		}
 		dsn = filepath.Join(home, dsn[2:])
 	}
 
@@ -91,14 +95,26 @@ func openStore() (store.Store, *gormstore.GormStore, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("opening postgres: %w", err)
 		}
+		sqlDB, err := db.DB()
+		if err != nil {
+			return nil, nil, fmt.Errorf("getting postgres pool: %w", err)
+		}
+		sqlDB.SetMaxOpenConns(25)
+		sqlDB.SetMaxIdleConns(5)
+		sqlDB.SetConnMaxLifetime(5 * time.Minute)
 	default: // sqlite
 		db, err = gorm.Open(sqlite.Open(dsn+"?_journal_mode=WAL&_busy_timeout=5000"), gormCfg)
 		if err != nil {
 			return nil, nil, fmt.Errorf("opening sqlite: %w", err)
 		}
-		sqlDB, _ := db.DB()
+		sqlDB, err := db.DB()
+		if err != nil {
+			return nil, nil, fmt.Errorf("getting underlying DB: %w", err)
+		}
 		sqlDB.SetMaxOpenConns(1)
-		sqlDB.Exec("PRAGMA foreign_keys = ON")
+		if _, err := sqlDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
+			return nil, nil, fmt.Errorf("enabling foreign keys: %w", err)
+		}
 	}
 
 	gs, err := gormstore.New(db)
@@ -136,12 +152,14 @@ func setupVector(gs *gormstore.GormStore) error {
 	}
 
 	// Create vector store
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	vs, err := chromadb.New(ctx,
 		cfg.Vector.ChromaDB.URL,
 		cfg.Vector.ChromaDB.Collection,
 		cfg.Vector.ChromaDB.Tenant,
 		cfg.Vector.ChromaDB.Database,
+		cfg.Vector.ChromaDB.AuthToken,
 	)
 	if err != nil {
 		return fmt.Errorf("vector store: %w", err)
@@ -198,9 +216,13 @@ func setupLogger(logCfg config.LogConfig) *slog.Logger {
 
 	output := os.Stderr
 	if logCfg.Output != "" && logCfg.Output != "stderr" {
-		f, err := os.OpenFile(logCfg.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		// File handle intentionally not closed — it remains open for the process
+		// lifetime and is reclaimed by the OS on exit.
+		f, err := os.OpenFile(logCfg.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err == nil {
 			output = f
+		} else {
+			fmt.Fprintf(os.Stderr, "WARNING: could not open log file %q: %v (falling back to stderr)\n", logCfg.Output, err)
 		}
 	}
 

@@ -13,9 +13,9 @@ var taskSearchCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
-		tasks, err := s.SearchTasks(args[0])
+		tasks, err := s.SearchTasks(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}

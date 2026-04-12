@@ -21,7 +21,7 @@ var linkAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		taskID, err := parseTaskID(args[0])
 		if err != nil {
@@ -33,11 +33,14 @@ var linkAddCmd = &cobra.Command{
 		var linkType model.LinkType
 		if typeStr != "" {
 			linkType = model.LinkType(typeStr)
+			if !model.ValidLinkTypes[linkType] {
+				return fmt.Errorf("invalid link type %q (valid: jira, pr, url)", typeStr)
+			}
 		} else {
 			linkType = detectLinkType(url)
 		}
 
-		link, err := s.AddLink(taskID, linkType, url)
+		link, err := s.AddLink(cmd.Context(), taskID, linkType, url)
 		if err != nil {
 			return err
 		}
@@ -59,14 +62,14 @@ var linkListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		taskID, err := parseTaskID(args[0])
 		if err != nil {
 			return err
 		}
 
-		links, err := s.ListLinks(taskID)
+		links, err := s.ListLinks(cmd.Context(), taskID)
 		if err != nil {
 			return err
 		}
@@ -85,7 +88,7 @@ var linkDeleteCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		taskID, err := parseTaskID(args[0])
 		if err != nil {
@@ -96,7 +99,7 @@ var linkDeleteCmd = &cobra.Command{
 			return err
 		}
 
-		if err := s.DeleteLink(taskID, linkID); err != nil {
+		if err := s.DeleteLink(cmd.Context(), taskID, linkID); err != nil {
 			return err
 		}
 

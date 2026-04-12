@@ -7,6 +7,7 @@ require (
 	github.com/mark3labs/mcp-go v0.47.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
+	gorm.io/driver/postgres v1.6.0
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.1
 )
@@ -52,5 +53,4 @@ require (
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
-	gorm.io/driver/postgres v1.6.0 // indirect
 )

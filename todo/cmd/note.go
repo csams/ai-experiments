@@ -21,7 +21,7 @@ var noteAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		taskID, err := parseTaskID(args[0])
 		if err != nil {
@@ -29,7 +29,7 @@ var noteAddCmd = &cobra.Command{
 		}
 		text := strings.Join(args[1:], " ")
 
-		note, err := s.AddNote(taskID, text)
+		note, err := s.AddNote(cmd.Context(), taskID, text)
 		if err != nil {
 			return err
 		}
@@ -51,7 +51,7 @@ var noteUpdateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		taskID, err := parseTaskID(args[0])
 		if err != nil {
@@ -63,7 +63,7 @@ var noteUpdateCmd = &cobra.Command{
 		}
 		text := strings.Join(args[2:], " ")
 
-		note, err := s.UpdateNote(taskID, noteID, text)
+		note, err := s.UpdateNote(cmd.Context(), taskID, noteID, text)
 		if err != nil {
 			return err
 		}
@@ -85,14 +85,14 @@ var noteListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		taskID, err := parseTaskID(args[0])
 		if err != nil {
 			return err
 		}
 
-		notes, err := s.ListNotes(taskID)
+		notes, err := s.ListNotes(cmd.Context(), taskID)
 		if err != nil {
 			return err
 		}
@@ -111,7 +111,7 @@ var noteDeleteCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		taskID, err := parseTaskID(args[0])
 		if err != nil {
@@ -122,7 +122,7 @@ var noteDeleteCmd = &cobra.Command{
 			return err
 		}
 
-		if err := s.DeleteNote(taskID, noteID); err != nil {
+		if err := s.DeleteNote(cmd.Context(), taskID, noteID); err != nil {
 			return err
 		}
 
@@ -140,9 +140,9 @@ var noteSearchCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
-		notes, err := s.SearchNotes(args[0])
+		notes, err := s.SearchNotes(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}

@@ -16,7 +16,7 @@ var taskBulkStateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		stateStr, _ := cmd.Flags().GetString("state")
 		if stateStr == "" {
@@ -32,7 +32,7 @@ var taskBulkStateCmd = &cobra.Command{
 			return err
 		}
 
-		tasks, err := s.BulkUpdateState(ids, state)
+		tasks, err := s.BulkUpdateState(cmd.Context(), ids, state)
 		if err != nil {
 			return err
 		}
@@ -54,7 +54,7 @@ var taskBulkPriorityCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		priority, err := cmd.Flags().GetInt("priority")
 		if err != nil || !cmd.Flags().Changed("priority") {
@@ -66,7 +66,7 @@ var taskBulkPriorityCmd = &cobra.Command{
 			return err
 		}
 
-		tasks, err := s.BulkUpdatePriority(ids, priority)
+		tasks, err := s.BulkUpdatePriority(cmd.Context(), ids, priority)
 		if err != nil {
 			return err
 		}
@@ -88,20 +88,23 @@ var taskBulkAddTagsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		tagsStr, _ := cmd.Flags().GetString("tags")
 		if tagsStr == "" {
 			return fmt.Errorf("--tags is required")
 		}
 		tags := strings.Split(tagsStr, ",")
+		for i := range tags {
+			tags[i] = strings.TrimSpace(tags[i])
+		}
 
 		ids, err := parseIDList(args)
 		if err != nil {
 			return err
 		}
 
-		if err := s.BulkAddTags(ids, tags); err != nil {
+		if err := s.BulkAddTags(cmd.Context(), ids, tags); err != nil {
 			return err
 		}
 
@@ -119,20 +122,23 @@ var taskBulkRemoveTagsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		tagsStr, _ := cmd.Flags().GetString("tags")
 		if tagsStr == "" {
 			return fmt.Errorf("--tags is required")
 		}
 		tags := strings.Split(tagsStr, ",")
+		for i := range tags {
+			tags[i] = strings.TrimSpace(tags[i])
+		}
 
 		ids, err := parseIDList(args)
 		if err != nil {
 			return err
 		}
 
-		if err := s.BulkRemoveTags(ids, tags); err != nil {
+		if err := s.BulkRemoveTags(cmd.Context(), ids, tags); err != nil {
 			return err
 		}
 

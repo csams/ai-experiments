@@ -1,13 +1,19 @@
 [Unit]
 Description=ChromaDB vector store for Todo task tracker
-After=todo-network.service
+After=todo-vector-network.service
 
 [Container]
 Image=ghcr.io/chroma-core/chroma:1.5.7
 ContainerName=todo-chromadb
-Network=todo.network
+Network=todo-vector.network
+Environment=CHROMA_SERVER_AUTHN_PROVIDER=chromadb.auth.token_authn.TokenAuthenticationServerProvider
+Secret=todo-chroma-token,type=env,target=CHROMA_SERVER_AUTHN_CREDENTIALS
 Volume=todo-chromadata.volume:/chroma/chroma
-PublishPort=8000:8000
+PublishPort=127.0.0.1:8000:8000
+HealthCmd=curl -f -H "Authorization: Bearer $CHROMA_SERVER_AUTHN_CREDENTIALS" http://localhost:8000/api/v2/heartbeat
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
 
 [Service]
 Restart=always

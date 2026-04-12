@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/csams/todo/embed"
 )
@@ -27,7 +28,7 @@ func New(model string) (*Embedder, error) {
 		return nil, fmt.Errorf("OPENAI_API_KEY environment variable is not set")
 	}
 
-	dims := 1536
+	var dims int
 	switch model {
 	case "text-embedding-3-small":
 		dims = 1536
@@ -35,13 +36,15 @@ func New(model string) (*Embedder, error) {
 		dims = 3072
 	case "text-embedding-ada-002":
 		dims = 1536
+	default:
+		return nil, fmt.Errorf("unknown embedding model %q; supported: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002", model)
 	}
 
 	return &Embedder{
 		apiKey: key,
 		model:  model,
 		dims:   dims,
-		client: &http.Client{},
+		client: &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 
@@ -69,6 +72,9 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 }
 
 func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
 	return e.doEmbed(ctx, texts)
 }
 
@@ -92,8 +98,8 @@ func (e *Embedder) doEmbed(ctx context.Context, input any) ([][]float32, error) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("openai %d: %s", resp.StatusCode, string(b))
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("openai embedding request failed with status %d: %s", resp.StatusCode, string(errBody))
 	}
 
 	var result embeddingResponse
@@ -103,6 +109,12 @@ func (e *Embedder) doEmbed(ctx context.Context, input any) ([][]float32, error) 
 
 	vecs := make([][]float32, len(result.Data))
 	for _, d := range result.Data {
+		if d.Index < 0 || d.Index >= len(vecs) {
+			return nil, fmt.Errorf("openai returned invalid embedding index %d for batch of %d", d.Index, len(vecs))
+		}
+		if vecs[d.Index] != nil {
+			return nil, fmt.Errorf("openai returned duplicate embedding index %d", d.Index)
+		}
 		vecs[d.Index] = d.Embedding
 	}
 	return vecs, nil

@@ -15,7 +15,7 @@ var taskBlockCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
@@ -27,7 +27,7 @@ var taskBlockCmd = &cobra.Command{
 			return fmt.Errorf("at least one --by <id> is required")
 		}
 
-		task, err := s.AddBlockers(id, byStrs)
+		task, err := s.AddBlockers(cmd.Context(), id, byStrs)
 		if err != nil {
 			return err
 		}
@@ -49,7 +49,7 @@ var taskUnblockCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
@@ -61,7 +61,7 @@ var taskUnblockCmd = &cobra.Command{
 			return fmt.Errorf("at least one --by <id> is required")
 		}
 
-		task, err := s.RemoveBlockers(id, byStrs)
+		task, err := s.RemoveBlockers(cmd.Context(), id, byStrs)
 		if err != nil {
 			return err
 		}

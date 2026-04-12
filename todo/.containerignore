@@ -1,0 +1,10 @@
+.git
+.gitignore
+.containerignore
+.env
+secrets/
+todo
+deploy/
+compose.yaml
+Makefile
+*.md

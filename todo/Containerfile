@@ -9,4 +9,5 @@ RUN go build -o todo .
 # Runtime stage
 FROM registry.access.redhat.com/ubi9-micro:9.6
 COPY --from=builder /app/todo /usr/local/bin/todo
+USER 65534
 ENTRYPOINT ["todo"]

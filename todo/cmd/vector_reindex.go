@@ -15,6 +15,12 @@ var vectorReindexCmd = &cobra.Command{
 	Use:   "reindex",
 	Short: "Reindex all tasks and notes into the vector store",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		s, _, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer s.Close(cmd.Context())
+
 		syncer := getVectorSyncer()
 		if syncer == nil {
 			return fmt.Errorf("vector sync is not configured (enable in config)")
@@ -22,7 +28,7 @@ var vectorReindexCmd = &cobra.Command{
 
 		clear, _ := cmd.Flags().GetBool("clear")
 
-		err := syncer.Reindex(cmd.Context(), clear, func(done, total int) {
+		err = syncer.Reindex(cmd.Context(), clear, func(done, total int) {
 			fmt.Printf("\rEmbedded %d/%d documents...", done, total)
 		})
 		if err != nil {

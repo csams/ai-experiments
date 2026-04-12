@@ -2,6 +2,7 @@ package gormstore_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 func TestCreateTask_Basic(t *testing.T) {
 	s := newTestStore(t)
 
-	task, err := s.CreateTask("Test task", "A description", 1, nil, nil)
+	task, err := s.CreateTask(ctx(), "Test task", "A description", 1, nil, nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -34,7 +35,7 @@ func TestCreateTask_WithTagsAndDueDate(t *testing.T) {
 	s := newTestStore(t)
 
 	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
-	task, err := s.CreateTask("Tagged task", "", 0, &due, []string{"backend", "urgent"})
+	task, err := s.CreateTask(ctx(), "Tagged task", "", 0, &due, []string{"backend", "urgent"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestCreateTask_WithTagsAndDueDate(t *testing.T) {
 
 func TestCreateTask_EmptyTitle(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.CreateTask("", "desc", 0, nil, nil)
+	_, err := s.CreateTask(ctx(), "", "desc", 0, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for empty title")
 	}
@@ -60,7 +61,7 @@ func TestCreateTask_EmptyTitle(t *testing.T) {
 
 func TestGetTask_NotFound(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.GetTask(999)
+	_, err := s.GetTask(ctx(), 999)
 	if !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -69,11 +70,11 @@ func TestGetTask_NotFound(t *testing.T) {
 func TestGetTask_WithDetails(t *testing.T) {
 	s := newTestStore(t)
 
-	task, _ := s.CreateTask("Parent", "", 0, nil, []string{"tag1"})
-	s.AddNote(task.ID, "a note")
-	s.AddLink(task.ID, model.LinkJira, "PROJ-123")
+	task, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, []string{"tag1"})
+	s.AddNote(ctx(), task.ID, "a note")
+	s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-123")
 
-	detail, err := s.GetTask(task.ID)
+	detail, err := s.GetTask(ctx(), task.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -91,11 +92,11 @@ func TestGetTask_WithDetails(t *testing.T) {
 func TestGetTask_ComputesBlockingList(t *testing.T) {
 	s := newTestStore(t)
 
-	a, _ := s.CreateTask("A", "", 0, nil, nil)
-	b, _ := s.CreateTask("B", "", 0, nil, nil)
-	s.AddBlockers(b.ID, []uint{a.ID})
+	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
+	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 
-	detail, err := s.GetTask(a.ID)
+	detail, err := s.GetTask(ctx(), a.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -106,10 +107,10 @@ func TestGetTask_ComputesBlockingList(t *testing.T) {
 
 func TestUpdateTask_PartialUpdate(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask("Original", "desc", 5, nil, nil)
+	task, _ := s.CreateTask(ctx(), "Original", "desc", 5, nil, nil)
 
 	newTitle := "Updated"
-	updated, err := s.UpdateTask(task.ID, store.UpdateTaskOptions{Title: &newTitle})
+	updated, err := s.UpdateTask(ctx(), task.ID, store.UpdateTaskOptions{Title: &newTitle})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -124,10 +125,10 @@ func TestUpdateTask_PartialUpdate(t *testing.T) {
 func TestUpdateTask_DueDate(t *testing.T) {
 	s := newTestStore(t)
 	due := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	task, _ := s.CreateTask("Task", "", 0, &due, nil)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, &due, nil)
 
 	// Clear due date
-	updated, err := s.UpdateTask(task.ID, store.UpdateTaskOptions{ClearDueAt: true})
+	updated, err := s.UpdateTask(ctx(), task.ID, store.UpdateTaskOptions{ClearDueAt: true})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestUpdateTask_DueDate(t *testing.T) {
 
 	// Set due date
 	newDue := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	updated, err = s.UpdateTask(task.ID, store.UpdateTaskOptions{DueAt: &newDue})
+	updated, err = s.UpdateTask(ctx(), task.ID, store.UpdateTaskOptions{DueAt: &newDue})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -148,12 +149,12 @@ func TestUpdateTask_DueDate(t *testing.T) {
 
 func TestListTasks_TopLevelOnly(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask("Parent", "", 0, nil, nil)
-	s.CreateTask("Child", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
+	s.CreateTask(ctx(), "Child", "", 0, nil, nil)
 	childID := uint(2)
-	s.SetParent(childID, &parent.ID)
+	s.SetParent(ctx(), childID, &parent.ID)
 
-	tasks, err := s.ListTasks(store.ListTasksOptions{})
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -164,12 +165,12 @@ func TestListTasks_TopLevelOnly(t *testing.T) {
 
 func TestListTasks_WithSubtasks(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask("Parent", "", 0, nil, nil)
-	s.CreateTask("Child", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
+	s.CreateTask(ctx(), "Child", "", 0, nil, nil)
 	childID := uint(2)
-	s.SetParent(childID, &parent.ID)
+	s.SetParent(ctx(), childID, &parent.ID)
 
-	tasks, err := s.ListTasks(store.ListTasksOptions{IncludeSubtasks: true})
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{IncludeSubtasks: true})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -180,12 +181,12 @@ func TestListTasks_WithSubtasks(t *testing.T) {
 
 func TestListTasks_FilterByState(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateTask("New task", "", 0, nil, nil)
-	task2, _ := s.CreateTask("Progressing", "", 0, nil, nil)
-	s.SetTaskState(task2.ID, model.StateProgressing)
+	s.CreateTask(ctx(), "New task", "", 0, nil, nil)
+	task2, _ := s.CreateTask(ctx(), "Progressing", "", 0, nil, nil)
+	s.SetTaskState(ctx(), task2.ID, model.StateProgressing)
 
 	state := model.StateProgressing
-	tasks, err := s.ListTasks(store.ListTasksOptions{State: &state})
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{State: &state})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -196,11 +197,11 @@ func TestListTasks_FilterByState(t *testing.T) {
 
 func TestListTasks_FilterByTags(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateTask("T1", "", 0, nil, []string{"backend", "urgent"})
-	s.CreateTask("T2", "", 0, nil, []string{"backend"})
-	s.CreateTask("T3", "", 0, nil, []string{"frontend"})
+	s.CreateTask(ctx(), "T1", "", 0, nil, []string{"backend", "urgent"})
+	s.CreateTask(ctx(), "T2", "", 0, nil, []string{"backend"})
+	s.CreateTask(ctx(), "T3", "", 0, nil, []string{"frontend"})
 
-	tasks, err := s.ListTasks(store.ListTasksOptions{Tags: []string{"backend", "urgent"}})
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{Tags: []string{"backend", "urgent"}})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -211,15 +212,15 @@ func TestListTasks_FilterByTags(t *testing.T) {
 
 func TestDeleteTask_CascadesNotesLinksTagsBlockers(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask("Task", "", 0, nil, []string{"tag1"})
-	s.AddNote(task.ID, "note")
-	s.AddLink(task.ID, model.LinkURL, "https://example.com")
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, []string{"tag1"})
+	s.AddNote(ctx(), task.ID, "note")
+	s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com")
 
-	if err := s.DeleteTask(task.ID, false); err != nil {
+	if err := s.DeleteTask(ctx(), task.ID, false); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
-	_, err := s.GetTask(task.ID)
+	_, err := s.GetTask(ctx(), task.ID)
 	if !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("expected ErrNotFound after delete, got %v", err)
 	}
@@ -229,10 +230,10 @@ func TestDeleteTask_CascadesNotesLinksTagsBlockers(t *testing.T) {
 
 func TestNotes_CRUD(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask("Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
 
 	// Add
-	note, err := s.AddNote(task.ID, "first note")
+	note, err := s.AddNote(ctx(), task.ID, "first note")
 	if err != nil {
 		t.Fatalf("add note: %v", err)
 	}
@@ -241,7 +242,7 @@ func TestNotes_CRUD(t *testing.T) {
 	}
 
 	// Update
-	updated, err := s.UpdateNote(task.ID, note.ID, "updated note")
+	updated, err := s.UpdateNote(ctx(), task.ID, note.ID, "updated note")
 	if err != nil {
 		t.Fatalf("update note: %v", err)
 	}
@@ -250,7 +251,7 @@ func TestNotes_CRUD(t *testing.T) {
 	}
 
 	// List
-	notes, err := s.ListNotes(task.ID)
+	notes, err := s.ListNotes(ctx(), task.ID)
 	if err != nil {
 		t.Fatalf("list notes: %v", err)
 	}
@@ -259,10 +260,10 @@ func TestNotes_CRUD(t *testing.T) {
 	}
 
 	// Delete
-	if err := s.DeleteNote(task.ID, note.ID); err != nil {
+	if err := s.DeleteNote(ctx(), task.ID, note.ID); err != nil {
 		t.Fatalf("delete note: %v", err)
 	}
-	notes, _ = s.ListNotes(task.ID)
+	notes, _ = s.ListNotes(ctx(), task.ID)
 	if len(notes) != 0 {
 		t.Errorf("notes after delete = %d, want 0", len(notes))
 	}
@@ -270,11 +271,11 @@ func TestNotes_CRUD(t *testing.T) {
 
 func TestDeleteNote_WrongTask(t *testing.T) {
 	s := newTestStore(t)
-	t1, _ := s.CreateTask("T1", "", 0, nil, nil)
-	t2, _ := s.CreateTask("T2", "", 0, nil, nil)
-	note, _ := s.AddNote(t1.ID, "note for t1")
+	t1, _ := s.CreateTask(ctx(), "T1", "", 0, nil, nil)
+	t2, _ := s.CreateTask(ctx(), "T2", "", 0, nil, nil)
+	note, _ := s.AddNote(ctx(), t1.ID, "note for t1")
 
-	err := s.DeleteNote(t2.ID, note.ID)
+	err := s.DeleteNote(ctx(), t2.ID, note.ID)
 	if !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -284,9 +285,9 @@ func TestDeleteNote_WrongTask(t *testing.T) {
 
 func TestLinks_CRUD(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask("Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
 
-	link, err := s.AddLink(task.ID, model.LinkJira, "PROJ-123")
+	link, err := s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-123")
 	if err != nil {
 		t.Fatalf("add link: %v", err)
 	}
@@ -294,15 +295,15 @@ func TestLinks_CRUD(t *testing.T) {
 		t.Errorf("unexpected link: %+v", link)
 	}
 
-	links, _ := s.ListLinks(task.ID)
+	links, _ := s.ListLinks(ctx(), task.ID)
 	if len(links) != 1 {
 		t.Errorf("links = %d, want 1", len(links))
 	}
 
-	if err := s.DeleteLink(task.ID, link.ID); err != nil {
+	if err := s.DeleteLink(ctx(), task.ID, link.ID); err != nil {
 		t.Fatalf("delete link: %v", err)
 	}
-	links, _ = s.ListLinks(task.ID)
+	links, _ = s.ListLinks(ctx(), task.ID)
 	if len(links) != 0 {
 		t.Errorf("links after delete = %d, want 0", len(links))
 	}
@@ -310,8 +311,8 @@ func TestLinks_CRUD(t *testing.T) {
 
 func TestAddLink_InvalidType(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask("Task", "", 0, nil, nil)
-	_, err := s.AddLink(task.ID, "invalid", "url")
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	_, err := s.AddLink(ctx(), task.ID, "invalid", "url")
 	if err == nil {
 		t.Fatal("expected error for invalid link type")
 	}
@@ -321,31 +322,31 @@ func TestAddLink_InvalidType(t *testing.T) {
 
 func TestTags_AddRemoveIdempotent(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask("Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
 
-	if err := s.AddTags(task.ID, []string{"a", "b"}); err != nil {
+	if err := s.AddTags(ctx(), task.ID, []string{"a", "b"}); err != nil {
 		t.Fatalf("add tags: %v", err)
 	}
 	// Idempotent: adding again should not error
-	if err := s.AddTags(task.ID, []string{"a"}); err != nil {
+	if err := s.AddTags(ctx(), task.ID, []string{"a"}); err != nil {
 		t.Fatalf("add tags again: %v", err)
 	}
 
-	detail, _ := s.GetTask(task.ID)
+	detail, _ := s.GetTask(ctx(), task.ID)
 	if len(detail.Tags) != 2 {
 		t.Errorf("tags = %d, want 2", len(detail.Tags))
 	}
 
-	if err := s.RemoveTags(task.ID, []string{"a"}); err != nil {
+	if err := s.RemoveTags(ctx(), task.ID, []string{"a"}); err != nil {
 		t.Fatalf("remove tags: %v", err)
 	}
-	detail, _ = s.GetTask(task.ID)
+	detail, _ = s.GetTask(ctx(), task.ID)
 	if len(detail.Tags) != 1 {
 		t.Errorf("tags after remove = %d, want 1", len(detail.Tags))
 	}
 
 	// Remove nonexistent tag: no error
-	if err := s.RemoveTags(task.ID, []string{"nonexistent"}); err != nil {
+	if err := s.RemoveTags(ctx(), task.ID, []string{"nonexistent"}); err != nil {
 		t.Fatalf("remove nonexistent: %v", err)
 	}
 }
@@ -354,10 +355,10 @@ func TestTags_AddRemoveIdempotent(t *testing.T) {
 
 func TestSearchTasks(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateTask("Fix login bug", "auth token expires", 0, nil, nil)
-	s.CreateTask("Update docs", "readme changes", 0, nil, nil)
+	s.CreateTask(ctx(), "Fix login bug", "auth token expires", 0, nil, nil)
+	s.CreateTask(ctx(), "Update docs", "readme changes", 0, nil, nil)
 
-	results, err := s.SearchTasks("login")
+	results, err := s.SearchTasks(ctx(), "login")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -365,19 +366,63 @@ func TestSearchTasks(t *testing.T) {
 		t.Errorf("results = %d, want 1", len(results))
 	}
 
-	results, _ = s.SearchTasks("auth")
+	results, _ = s.SearchTasks(ctx(), "auth")
 	if len(results) != 1 {
 		t.Errorf("results by desc = %d, want 1", len(results))
 	}
 }
 
+func TestSearchTasks_LIKEWildcardEscaping(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateTask(ctx(), "100% complete", "", 0, nil, nil)
+	s.CreateTask(ctx(), "Normal task", "", 0, nil, nil)
+
+	// A search for "%" should only match the task with literal %
+	results, err := s.SearchTasks(ctx(), "%")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("results = %d, want 1 (should not match all)", len(results))
+	}
+
+	// A search for "_" should match nothing (no task has literal _)
+	results, _ = s.SearchTasks(ctx(), "_")
+	if len(results) != 0 {
+		t.Errorf("underscore results = %d, want 0", len(results))
+	}
+}
+
+func TestListTasks_Pagination(t *testing.T) {
+	s := newTestStore(t)
+	for i := 0; i < 5; i++ {
+		s.CreateTask(ctx(), fmt.Sprintf("Task %d", i), "", 0, nil, nil)
+	}
+
+	// Limit
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("limit=2 got %d tasks, want 2", len(tasks))
+	}
+
+	// Offset
+	all, _ := s.ListTasks(ctx(), store.ListTasksOptions{Limit: 10})
+	offset, _ := s.ListTasks(ctx(), store.ListTasksOptions{Limit: 10, Offset: 2})
+	if len(offset) != len(all)-2 {
+		t.Errorf("offset=2 got %d tasks, want %d", len(offset), len(all)-2)
+	}
+}
+
 func TestSearchNotes(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask("Task", "", 0, nil, nil)
-	s.AddNote(task.ID, "checked auth token expiry")
-	s.AddNote(task.ID, "unrelated note")
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	s.AddNote(ctx(), task.ID, "checked auth token expiry")
+	s.AddNote(ctx(), task.ID, "unrelated note")
 
-	results, err := s.SearchNotes("auth")
+	results, err := s.SearchNotes(ctx(), "auth")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}

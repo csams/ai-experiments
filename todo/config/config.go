@@ -25,15 +25,35 @@ type PostgresConfig struct {
 	Port     int    `yaml:"port" mapstructure:"port"`
 	DBName   string `yaml:"dbname" mapstructure:"dbname"`
 	User     string `yaml:"user" mapstructure:"user"`
-	Password string `yaml:"password" mapstructure:"password"`
+	Password string `yaml:"password" mapstructure:"password" json:"-"`
 	SSLMode  string `yaml:"sslmode" mapstructure:"sslmode"`
 }
 
 // PostgresDSN builds a connection string from the Postgres config fields.
+// WARNING: The returned string contains the plaintext password. Do not log it.
 func (p PostgresConfig) PostgresDSN() string {
 	return fmt.Sprintf(
+		"host=%s port=%d user=%s password='%s' dbname=%s sslmode=%s",
+		p.Host, p.Port, p.User, quoteLibpq(p.Password), p.DBName, p.SSLMode,
+	)
+}
+
+// quoteLibpq escapes a value for use inside single quotes in a libpq connection string.
+func quoteLibpq(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `'`, `\'`)
+	return s
+}
+
+// String returns the DSN with the password masked, suitable for logging.
+func (p PostgresConfig) String() string {
+	masked := "***"
+	if p.Password == "" {
+		masked = ""
+	}
+	return fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		p.Host, p.Port, p.User, p.Password, p.DBName, p.SSLMode,
+		p.Host, p.Port, p.User, masked, p.DBName, p.SSLMode,
 	)
 }
 
@@ -60,6 +80,7 @@ type ChromaConfig struct {
 	Collection string `yaml:"collection" mapstructure:"collection"`
 	Tenant     string `yaml:"tenant" mapstructure:"tenant"`
 	Database   string `yaml:"database" mapstructure:"database"`
+	AuthToken  string `yaml:"auth_token" mapstructure:"auth_token" json:"-"`
 }
 
 type LogConfig struct {
@@ -72,6 +93,9 @@ type LogConfig struct {
 type MCPConfig struct {
 	Transport string `yaml:"transport" mapstructure:"transport"`
 	Addr      string `yaml:"addr" mapstructure:"addr"`
+	APIKey    string `yaml:"api_key" mapstructure:"api_key" json:"-"`
+	TLSCert   string `yaml:"tls_cert" mapstructure:"tls_cert"`
+	TLSKey    string `yaml:"tls_key" mapstructure:"tls_key"`
 }
 
 // Load reads config from a YAML file, environment variables, and applies defaults.
@@ -114,7 +138,6 @@ func Load(configPath string) (*Config, error) {
 		v.SetConfigName(".todo")
 		v.SetConfigType("yaml")
 		v.AddConfigPath("$HOME")
-		v.AddConfigPath(".")
 	}
 
 	// Environment variables: TODO_DB_DRIVER, TODO_LOGGING_LEVEL, etc.

@@ -15,7 +15,7 @@ var taskStateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
@@ -27,7 +27,7 @@ var taskStateCmd = &cobra.Command{
 			return err
 		}
 
-		task, err := s.SetTaskState(id, state)
+		task, err := s.SetTaskState(cmd.Context(), id, state)
 		if err != nil {
 			return err
 		}

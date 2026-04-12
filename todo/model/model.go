@@ -41,8 +41,8 @@ var ValidLinkTypes = map[LinkType]bool{
 // Task is the core entity in the system.
 type Task struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
-	Title       string     `gorm:"not null;size:500" json:"title"`
-	Description string     `gorm:"size:10000" json:"description,omitempty"`
+	Title       string     `gorm:"not null;size:512" json:"title"`
+	Description string     `json:"description,omitempty"`
 	Priority    int        `gorm:"not null;default:0" json:"priority"`
 	State       TaskState  `gorm:"not null;default:'New';size:20" json:"state"`
 	Archived    bool       `gorm:"not null;default:false" json:"archived"`
@@ -92,7 +92,7 @@ type Link struct {
 type Note struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
 	TaskID      uint      `gorm:"not null;index" json:"task_id"`
-	Text        string    `gorm:"not null;size:50000" json:"text"`
+	Text        string    `gorm:"not null" json:"text"`
 	VectorDirty bool      `gorm:"not null;default:false" json:"-"`
 	CreatedAt   time.Time `json:"created_at"`
 }

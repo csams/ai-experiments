@@ -15,14 +15,14 @@ var taskArchiveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
 			return err
 		}
 
-		if err := s.ArchiveTask(id, true); err != nil {
+		if err := s.ArchiveTask(cmd.Context(), id, true); err != nil {
 			return err
 		}
 
@@ -40,14 +40,14 @@ var taskUnarchiveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
 			return err
 		}
 
-		if err := s.ArchiveTask(id, false); err != nil {
+		if err := s.ArchiveTask(cmd.Context(), id, false); err != nil {
 			return err
 		}
 

@@ -59,6 +59,13 @@ func (v *VectorSyncer) syncTasks(ctx context.Context, event store.StoreEvent) er
 		"task.bulk_state_changed", "task.bulk_priority_changed":
 		return v.embedTasks(ctx, event.TaskIDs)
 
+	case "task.archived", "task.unarchived":
+		// Re-embed task (updates archived metadata) and all its notes
+		if err := v.embedTasks(ctx, event.TaskIDs); err != nil {
+			return err
+		}
+		return v.reembedTaskNotes(ctx, event.TaskIDs)
+
 	case "task.deleted":
 		// Delete task and all its notes from vector store
 		var ids []string
@@ -94,7 +101,7 @@ func (v *VectorSyncer) embedTasks(ctx context.Context, taskIDs []uint) error {
 	var texts []string
 
 	for _, tid := range taskIDs {
-		detail, err := v.store.GetTask(tid)
+		detail, err := v.store.GetTask(ctx, tid)
 		if err != nil {
 			continue // task may have been deleted
 		}
@@ -122,41 +129,57 @@ func (v *VectorSyncer) embedTasks(ctx context.Context, taskIDs []uint) error {
 	if err != nil {
 		return err
 	}
+	if len(vecs) != len(docs) {
+		return fmt.Errorf("embedding count mismatch: got %d vectors for %d documents", len(vecs), len(docs))
+	}
 
 	for i := range docs {
-		if i < len(vecs) {
-			docs[i].Vector = vecs[i]
-		}
+		docs[i].Vector = vecs[i]
 	}
 
 	return v.vs.Upsert(ctx, docs)
 }
 
 func (v *VectorSyncer) embedNotes(ctx context.Context, taskIDs []uint, noteIDs []uint) error {
+	if len(taskIDs) != len(noteIDs) {
+		return fmt.Errorf("taskIDs/noteIDs length mismatch: %d vs %d", len(taskIDs), len(noteIDs))
+	}
+
 	var docs []vectorstore.Document
 	var texts []string
 
+	// Cache ListNotes and task archived status by taskID to avoid duplicate calls
+	noteCache := map[uint][]model.Note{}
+	archivedCache := map[uint]bool{}
 	for i, nid := range noteIDs {
-		taskID := uint(0)
-		if i < len(taskIDs) {
-			taskID = taskIDs[i]
+		taskID := taskIDs[i]
+
+		if _, cached := noteCache[taskID]; !cached {
+			notes, err := v.store.ListNotes(ctx, taskID)
+			if err != nil {
+				continue
+			}
+			noteCache[taskID] = notes
+		}
+		if _, cached := archivedCache[taskID]; !cached {
+			detail, err := v.store.GetTask(ctx, taskID)
+			if err != nil {
+				continue
+			}
+			archivedCache[taskID] = detail.Archived
 		}
 
-		// Fetch note text
-		notes, err := v.store.ListNotes(taskID)
-		if err != nil {
-			continue
-		}
-		for _, n := range notes {
+		for _, n := range noteCache[taskID] {
 			if n.ID == nid {
 				texts = append(texts, n.Text)
 				docs = append(docs, vectorstore.Document{
 					ID:   fmt.Sprintf("note:%d", n.ID),
 					Text: n.Text,
 					Metadata: map[string]any{
-						"type":    "note",
-						"task_id": int(n.TaskID),
-						"note_id": int(n.ID),
+						"type":     "note",
+						"task_id":  int(n.TaskID),
+						"note_id":  int(n.ID),
+						"archived": archivedCache[taskID],
 					},
 				})
 				break
@@ -172,19 +195,44 @@ func (v *VectorSyncer) embedNotes(ctx context.Context, taskIDs []uint, noteIDs [
 	if err != nil {
 		return err
 	}
+	if len(vecs) != len(docs) {
+		return fmt.Errorf("embedding count mismatch: got %d vectors for %d documents", len(vecs), len(docs))
+	}
 
 	for i := range docs {
-		if i < len(vecs) {
-			docs[i].Vector = vecs[i]
-		}
+		docs[i].Vector = vecs[i]
 	}
 
 	return v.vs.Upsert(ctx, docs)
 }
 
-func (v *VectorSyncer) markDirty(_ context.Context, _ store.StoreEvent) {
-	// In a full implementation, this would set vector_sync_dirty = true on
-	// the affected tasks/notes. For now, we rely on `vector reindex` for recovery.
+// reembedTaskNotes re-embeds all notes for the given tasks, updating their metadata.
+func (v *VectorSyncer) reembedTaskNotes(ctx context.Context, taskIDs []uint) error {
+	var allTaskIDs, allNoteIDs []uint
+	for _, tid := range taskIDs {
+		notes, err := v.store.ListNotes(ctx, tid)
+		if err != nil {
+			continue
+		}
+		for _, n := range notes {
+			allTaskIDs = append(allTaskIDs, tid)
+			allNoteIDs = append(allNoteIDs, n.ID)
+		}
+	}
+	if len(allNoteIDs) == 0 {
+		return nil
+	}
+	return v.embedNotes(ctx, allTaskIDs, allNoteIDs)
+}
+
+// markDirty logs a warning when vector sync fails so operators know to reindex.
+// TODO: Implement full recovery by setting VectorDirty=true on affected records
+// (model.Task.VectorDirty, model.Note.VectorDirty) and auto-retrying.
+func (v *VectorSyncer) markDirty(_ context.Context, event store.StoreEvent) {
+	v.logger.Warn("vector sync failed for entities; run 'todo vector reindex' to recover",
+		"task_ids", event.TaskIDs,
+		"note_ids", event.NoteIDs,
+	)
 }
 
 // buildTaskEmbedText creates the enriched text for task embedding.
@@ -227,6 +275,10 @@ func (v *VectorSyncer) SemanticSearch(ctx context.Context, query string, opts st
 	if opts.TaskID != nil {
 		filter.TaskID = opts.TaskID
 	}
+	if !opts.IncludeArchived {
+		f := false
+		filter.Archived = &f
+	}
 
 	results, err := v.vs.Search(ctx, vec, limit, filter)
 	if err != nil {
@@ -238,7 +290,7 @@ func (v *VectorSyncer) SemanticSearch(ctx context.Context, query string, opts st
 
 func (v *VectorSyncer) SemanticSearchContext(ctx context.Context, taskID uint, opts store.SemanticSearchOptions) ([]store.SemanticSearchResult, error) {
 	// Aggregate task text + all note texts into a single query
-	detail, err := v.store.GetTask(taskID)
+	detail, err := v.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +328,10 @@ func (v *VectorSyncer) SemanticSearchContext(ctx context.Context, taskID uint, o
 	if opts.Type != "" {
 		filter.Type = &opts.Type
 	}
+	if !opts.IncludeArchived {
+		f := false
+		filter.Archived = &f
+	}
 
 	results, err := v.vs.Search(ctx, vec, limit+len(excludeIDs), filter)
 	if err != nil {
@@ -299,12 +355,18 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 	}
 
 	// Fetch all tasks
-	tasks, err := v.store.ListTasks(store.ListTasksOptions{
+	tasks, err := v.store.ListTasks(ctx, store.ListTasksOptions{
 		IncludeArchived: true,
 		IncludeSubtasks: true,
 	})
 	if err != nil {
 		return fmt.Errorf("listing tasks: %w", err)
+	}
+
+	// Build task archived lookup
+	taskArchived := make(map[uint]bool, len(tasks))
+	for _, t := range tasks {
+		taskArchived[t.ID] = t.Archived
 	}
 
 	// Fetch all notes for all tasks
@@ -314,7 +376,7 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 	}
 	var allNotes []noteEntry
 	for _, t := range tasks {
-		notes, err := v.store.ListNotes(t.ID)
+		notes, err := v.store.ListNotes(ctx, t.ID)
 		if err != nil {
 			continue
 		}
@@ -357,10 +419,11 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		if err != nil {
 			return fmt.Errorf("embedding tasks batch %d: %w", i/batchSize, err)
 		}
+		if len(vecs) != len(docs) {
+			return fmt.Errorf("embedding tasks batch %d: got %d vectors for %d documents", i/batchSize, len(vecs), len(docs))
+		}
 		for j := range docs {
-			if j < len(vecs) {
-				docs[j].Vector = vecs[j]
-			}
+			docs[j].Vector = vecs[j]
 		}
 		if err := v.vs.Upsert(ctx, docs); err != nil {
 			return fmt.Errorf("upserting tasks batch %d: %w", i/batchSize, err)
@@ -388,9 +451,10 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 				ID:   fmt.Sprintf("note:%d", ne.note.ID),
 				Text: ne.note.Text,
 				Metadata: map[string]any{
-					"type":    "note",
-					"task_id": int(ne.taskID),
-					"note_id": int(ne.note.ID),
+					"type":     "note",
+					"task_id":  int(ne.taskID),
+					"note_id":  int(ne.note.ID),
+					"archived": taskArchived[ne.taskID],
 				},
 			})
 		}
@@ -399,10 +463,11 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		if err != nil {
 			return fmt.Errorf("embedding notes batch %d: %w", i/batchSize, err)
 		}
+		if len(vecs) != len(docs) {
+			return fmt.Errorf("embedding notes batch %d: got %d vectors for %d documents", i/batchSize, len(vecs), len(docs))
+		}
 		for j := range docs {
-			if j < len(vecs) {
-				docs[j].Vector = vecs[j]
-			}
+			docs[j].Vector = vecs[j]
 		}
 		if err := v.vs.Upsert(ctx, docs); err != nil {
 			return fmt.Errorf("upserting notes batch %d: %w", i/batchSize, err)

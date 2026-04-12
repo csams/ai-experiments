@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"log/slog"
+	"sort"
 
 	"github.com/csams/todo/store"
 )
@@ -31,7 +32,13 @@ func (a *Logger) OnEvent(_ context.Context, event store.StoreEvent) {
 		attrs = append(attrs, "note_ids", event.NoteIDs)
 	}
 	if len(event.Changes) > 0 {
-		for field, change := range event.Changes {
+		fields := make([]string, 0, len(event.Changes))
+		for field := range event.Changes {
+			fields = append(fields, field)
+		}
+		sort.Strings(fields)
+		for _, field := range fields {
+			change := event.Changes[field]
 			attrs = append(attrs,
 				"change."+field+".old", change.Old,
 				"change."+field+".new", change.New,

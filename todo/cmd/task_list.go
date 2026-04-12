@@ -14,7 +14,7 @@ var taskListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		opts := store.ListTasksOptions{}
 		opts.IncludeArchived, _ = cmd.Flags().GetBool("all")
@@ -39,7 +39,7 @@ var taskListCmd = &cobra.Command{
 			opts.ParentID = &pid
 		}
 
-		tasks, err := s.ListTasks(opts)
+		tasks, err := s.ListTasks(cmd.Context(), opts)
 		if err != nil {
 			return err
 		}

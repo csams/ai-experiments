@@ -11,42 +11,43 @@ import (
 // All mutating operations must be wrapped in transactions.
 type Store interface {
 	// Tasks
-	CreateTask(title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
-	GetTask(id uint) (*model.TaskDetail, error)
-	ListTasks(opts ListTasksOptions) ([]model.Task, error)
-	UpdateTask(id uint, opts UpdateTaskOptions) (*model.Task, error)
-	SetTaskState(id uint, state model.TaskState) (*model.Task, error) // non-Blocked only; Blocked returns ErrInvalidState
-	AddBlockers(taskID uint, blockerIDs []uint) (*model.Task, error)
-	RemoveBlockers(taskID uint, blockerIDs []uint) (*model.Task, error)
-	SetParent(id uint, parentID *uint) error
-	ArchiveTask(id uint, archived bool) error
-	DeleteTask(id uint, recursive bool) error
-	SearchTasks(query string) ([]model.Task, error)
-	SearchNotes(query string) ([]model.Note, error)
+	CreateTask(ctx context.Context, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
+	CreateSubtask(ctx context.Context, parentID uint, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
+	GetTask(ctx context.Context, id uint) (*model.TaskDetail, error)
+	ListTasks(ctx context.Context, opts ListTasksOptions) ([]model.Task, error)
+	UpdateTask(ctx context.Context, id uint, opts UpdateTaskOptions) (*model.Task, error)
+	SetTaskState(ctx context.Context, id uint, state model.TaskState) (*model.Task, error) // non-Blocked only; Blocked returns ErrInvalidState
+	AddBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error)
+	RemoveBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error)
+	SetParent(ctx context.Context, id uint, parentID *uint) error
+	ArchiveTask(ctx context.Context, id uint, archived bool) error
+	DeleteTask(ctx context.Context, id uint, recursive bool) error
+	SearchTasks(ctx context.Context, query string) ([]model.Task, error)
+	SearchNotes(ctx context.Context, query string) ([]model.Note, error)
 
 	// Bulk operations (max 100 IDs per call)
-	BulkUpdateState(ids []uint, state model.TaskState) ([]model.Task, error)
-	BulkUpdatePriority(ids []uint, priority int) ([]model.Task, error)
-	BulkAddTags(ids []uint, tags []string) error
-	BulkRemoveTags(ids []uint, tags []string) error
+	BulkUpdateState(ctx context.Context, ids []uint, state model.TaskState) ([]model.Task, error)
+	BulkUpdatePriority(ctx context.Context, ids []uint, priority int) ([]model.Task, error)
+	BulkAddTags(ctx context.Context, ids []uint, tags []string) error
+	BulkRemoveTags(ctx context.Context, ids []uint, tags []string) error
 
 	// Tags
-	AddTags(taskID uint, tags []string) error
-	RemoveTags(taskID uint, tags []string) error
+	AddTags(ctx context.Context, taskID uint, tags []string) error
+	RemoveTags(ctx context.Context, taskID uint, tags []string) error
 
 	// Links
-	AddLink(taskID uint, linkType model.LinkType, url string) (*model.Link, error)
-	ListLinks(taskID uint) ([]model.Link, error)
-	DeleteLink(taskID uint, linkID uint) error
+	AddLink(ctx context.Context, taskID uint, linkType model.LinkType, url string) (*model.Link, error)
+	ListLinks(ctx context.Context, taskID uint) ([]model.Link, error)
+	DeleteLink(ctx context.Context, taskID uint, linkID uint) error
 
 	// Notes
-	AddNote(taskID uint, text string) (*model.Note, error)
-	UpdateNote(taskID uint, noteID uint, text string) (*model.Note, error)
-	ListNotes(taskID uint) ([]model.Note, error)
-	DeleteNote(taskID uint, noteID uint) error
+	AddNote(ctx context.Context, taskID uint, text string) (*model.Note, error)
+	UpdateNote(ctx context.Context, taskID uint, noteID uint, text string) (*model.Note, error)
+	ListNotes(ctx context.Context, taskID uint) ([]model.Note, error)
+	DeleteNote(ctx context.Context, taskID uint, noteID uint) error
 
 	// Lifecycle
-	Close() error
+	Close(ctx context.Context) error
 }
 
 // UpdateTaskOptions holds optional fields for updating a task.
@@ -68,6 +69,8 @@ type ListTasksOptions struct {
 	Tags            []string         // AND logic: task must have all specified tags
 	Overdue         bool             // only tasks past due date
 	SortBy          string           // "priority" (default), "due", "created", "updated"
+	Limit           int
+	Offset          int
 }
 
 // StoreEvent is emitted by the store after successful mutations.
@@ -100,9 +103,10 @@ type SemanticSearcher interface {
 
 // SemanticSearchOptions controls semantic search behavior.
 type SemanticSearchOptions struct {
-	Limit  int    // max results (default 10)
-	Type   string // filter by "task", "note", or "" for all
-	TaskID *uint  // filter to a specific task's entities
+	Limit           int    // max results (default 10)
+	Type            string // filter by "task", "note", or "" for all
+	TaskID          *uint  // filter to a specific task's entities
+	IncludeArchived bool   // when false (default), exclude archived items
 }
 
 // SemanticSearchResult is a single result from semantic search.

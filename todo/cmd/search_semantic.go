@@ -17,6 +17,12 @@ var searchSemanticCmd = &cobra.Command{
 	Short: "Semantic search across tasks and notes using vector similarity",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		s, _, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer s.Close(cmd.Context())
+
 		ss := getSemanticSearcher()
 		if ss == nil {
 			return fmt.Errorf("semantic search is not configured (enable vector sync in config)")
@@ -25,10 +31,12 @@ var searchSemanticCmd = &cobra.Command{
 		typeFilter, _ := cmd.Flags().GetString("type")
 		taskStr, _ := cmd.Flags().GetString("task")
 		limit, _ := cmd.Flags().GetInt("limit")
+		includeArchived, _ := cmd.Flags().GetBool("include-archived")
 
 		opts := store.SemanticSearchOptions{
-			Limit: limit,
-			Type:  typeFilter,
+			Limit:           limit,
+			Type:            typeFilter,
+			IncludeArchived: includeArchived,
 		}
 		if taskStr != "" {
 			tid, err := parseTaskID(taskStr)
@@ -53,6 +61,12 @@ var searchContextCmd = &cobra.Command{
 	Short: "Find items semantically related to a task",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		s, _, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer s.Close(cmd.Context())
+
 		ss := getSemanticSearcher()
 		if ss == nil {
 			return fmt.Errorf("semantic search is not configured (enable vector sync in config)")
@@ -65,10 +79,12 @@ var searchContextCmd = &cobra.Command{
 
 		limit, _ := cmd.Flags().GetInt("limit")
 		typeFilter, _ := cmd.Flags().GetString("type")
+		includeArchived, _ := cmd.Flags().GetBool("include-archived")
 
 		results, err := ss.SemanticSearchContext(cmd.Context(), tid, store.SemanticSearchOptions{
-			Limit: limit,
-			Type:  typeFilter,
+			Limit:           limit,
+			Type:            typeFilter,
+			IncludeArchived: includeArchived,
 		})
 		if err != nil {
 			return err
@@ -102,9 +118,11 @@ func init() {
 	searchSemanticCmd.Flags().String("type", "", "filter by type: task, note")
 	searchSemanticCmd.Flags().String("task", "", "filter to a specific task's entities")
 	searchSemanticCmd.Flags().Int("limit", 10, "max results")
+	searchSemanticCmd.Flags().Bool("include-archived", false, "include archived tasks/notes")
 
 	searchContextCmd.Flags().Int("limit", 10, "max results")
 	searchContextCmd.Flags().String("type", "", "filter by type: task, note")
+	searchContextCmd.Flags().Bool("include-archived", false, "include archived tasks/notes")
 
 	searchCmd.AddCommand(searchSemanticCmd)
 	searchCmd.AddCommand(searchContextCmd)

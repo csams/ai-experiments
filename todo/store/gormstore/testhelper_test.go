@@ -1,6 +1,7 @@
 package gormstore_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/csams/todo/store/gormstore"
@@ -26,13 +27,20 @@ func newTestStore(t *testing.T) *gormstore.GormStore {
 	sqlDB.SetMaxOpenConns(1)
 
 	// Enable foreign keys for SQLite
-	sqlDB.Exec("PRAGMA foreign_keys = ON")
+	if _, err := sqlDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
 
 	s, err := gormstore.New(db)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+	s.SetSyncEmit(true)
 
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { s.Close(context.Background()) })
 	return s
+}
+
+func ctx() context.Context {
+	return context.Background()
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/csams/todo/embed"
 )
@@ -24,13 +25,16 @@ func New(url, model string) (*Embedder, error) {
 	e := &Embedder{
 		url:    url,
 		model:  model,
-		client: &http.Client{},
+		client: &http.Client{Timeout: 30 * time.Second},
 	}
 
 	// Probe dimensions by embedding a short string
 	vec, err := e.Embed(context.Background(), "dimension probe")
 	if err != nil {
 		return nil, fmt.Errorf("ollama probe (is Ollama running at %s with model %s?): %w", url, model, err)
+	}
+	if len(vec) == 0 {
+		return nil, fmt.Errorf("ollama returned empty embedding vector for model %s", model)
 	}
 	e.dims = len(vec)
 
@@ -58,6 +62,9 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 }
 
 func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
 	return e.doEmbed(ctx, texts)
 }
 
@@ -80,8 +87,8 @@ func (e *Embedder) doEmbed(ctx context.Context, input any) ([][]float32, error) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama %d: %s", resp.StatusCode, string(b))
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama embedding request failed with status %d: %s", resp.StatusCode, string(errBody))
 	}
 
 	var result embedResponse

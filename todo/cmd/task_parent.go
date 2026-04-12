@@ -15,7 +15,7 @@ var taskParentCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
@@ -26,7 +26,7 @@ var taskParentCmd = &cobra.Command{
 			return err
 		}
 
-		if err := s.SetParent(id, &parentID); err != nil {
+		if err := s.SetParent(cmd.Context(), id, &parentID); err != nil {
 			return err
 		}
 
@@ -44,14 +44,14 @@ var taskUnparentCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
 			return err
 		}
 
-		if err := s.SetParent(id, nil); err != nil {
+		if err := s.SetParent(cmd.Context(), id, nil); err != nil {
 			return err
 		}
 

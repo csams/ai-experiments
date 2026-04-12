@@ -1,16 +1,14 @@
 services:
   postgres:
-    image: docker.io/library/postgres:16
+    image: docker.io/library/postgres:16.13
     environment:
       POSTGRES_DB: todo
       POSTGRES_USER: todo
-      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
-    secrets:
-      - pg_password
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U todo -d todo"]
       interval: 5s
@@ -18,13 +16,16 @@ services:
       retries: 5
 
   chromadb:
-    image: ghcr.io/chroma-core/chroma:latest
+    image: ghcr.io/chroma-core/chroma:1.5.7
+    environment:
+      CHROMA_SERVER_AUTHN_PROVIDER: chromadb.auth.token_authn.TokenAuthenticationServerProvider
+      CHROMA_SERVER_AUTHN_CREDENTIALS: ${CHROMA_TOKEN}
     volumes:
       - chromadata:/chroma/chroma
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      test: ["CMD", "curl", "-f", "-H", "Authorization: Bearer ${CHROMA_SERVER_AUTHN_CREDENTIALS}", "http://localhost:8000/api/v2/heartbeat"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -33,15 +34,18 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-    command: ["mcp", "--transport", "http", "--addr", ":8080"]
+    command: ["mcp", "--config", "/etc/todo/config.yaml", "--transport", "http", "--addr", ":8080"]
     environment:
-      - TODO_CONFIG=/etc/todo/config.yaml
-      - PGPASSWORD_FILE=/run/secrets/pg_password
+      - TODO_DB_POSTGRES_HOST=postgres
+      - TODO_DB_POSTGRES_PASSWORD=${PG_PASSWORD}
+      - TODO_VECTOR_CHROMADB_URL=http://chromadb:8000
+      - TODO_VECTOR_CHROMADB_AUTH_TOKEN=${CHROMA_TOKEN}
+      - TODO_MCP_API_KEY=${MCP_API_KEY:-}
+      - TODO_MCP_TLS_CERT=${MCP_TLS_CERT:-}
+      - TODO_MCP_TLS_KEY=${MCP_TLS_KEY:-}
     configs:
       - source: todo_config
         target: /etc/todo/config.yaml
-    secrets:
-      - pg_password
     ports:
       - "8080:8080"
     depends_on:
@@ -58,6 +62,3 @@ configs:
   todo_config:
     file: ./deploy/production.yaml
 
-secrets:
-  pg_password:
-    file: ./secrets/pg_password

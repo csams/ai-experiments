@@ -1,16 +1,16 @@
 [Unit]
 Description=PostgreSQL for Todo task tracker
-After=todo-network.service
+After=todo-db-network.service
 
 [Container]
 Image=docker.io/library/postgres:16.13
 ContainerName=todo-postgres
-Network=todo.network
+Network=todo-db.network
 Environment=POSTGRES_DB=todo
 Environment=POSTGRES_USER=todo
 Secret=todo-pg-password,type=env,target=POSTGRES_PASSWORD
 Volume=todo-pgdata.volume:/var/lib/postgresql/data
-PublishPort=5432:5432
+PublishPort=127.0.0.1:5432:5432
 HealthCmd=pg_isready -U todo -d todo
 HealthInterval=10s
 HealthTimeout=5s

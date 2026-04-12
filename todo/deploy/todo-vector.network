@@ -1,0 +1,5 @@
+# Isolated network for ChromaDB traffic.
+# Change subnet if 10.89.2.0/24 conflicts with your environment.
+[Network]
+Driver=bridge
+Subnet=10.89.2.0/24

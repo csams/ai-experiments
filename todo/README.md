@@ -15,7 +15,7 @@ A task tracking system designed for both CLI use and AI agent access via MCP (Mo
 - **Bulk operations**: state, priority, and tag changes across multiple tasks
 - **Full-text search**: tasks and notes
 - **Semantic search** (optional): vector similarity via Ollama/OpenAI + ChromaDB
-- **MCP server**: 27 tools for AI agent access (stdio + HTTP transports)
+- **MCP server**: 28 tools for AI agent access (26 core + 2 semantic search; stdio + HTTP transports)
 - **Structured audit logging**: all mutations logged with before/after state
 - **YAML configuration**: with env var overrides
 - **Pluggable storage**: SQLite (default) or PostgreSQL via GORM
@@ -138,7 +138,7 @@ db:
     port: 5432
     dbname: todo
     user: todo
-    password: ""
+    password: ""                          # prefer TODO_DB_POSTGRES_PASSWORD env var
     sslmode: disable
 
 vector:
@@ -153,6 +153,9 @@ vector:
   chromadb:
     url: http://localhost:8000
     collection: todo
+    tenant: default_tenant
+    database: default_database
+    auth_token: ""                          # optional; set via TODO_VECTOR_CHROMADB_AUTH_TOKEN
 
 logging:
   level: info                             # debug, info, warn, error
@@ -163,6 +166,9 @@ logging:
 mcp:
   transport: stdio                        # stdio or http
   addr: ":8080"
+  api_key: ""                             # optional; set via TODO_MCP_API_KEY
+  tls_cert: ""                            # path to TLS certificate
+  tls_key: ""                             # path to TLS key
 ```
 
 All settings can be set via environment variables with `TODO_` prefix and `_` separators:
@@ -198,8 +204,12 @@ TODO_VECTOR_ENABLED=true ./todo task list
 ### Podman Compose
 
 ```bash
-# Create password file
-echo "changeme" > secrets/pg_password
+# Create .env with secrets
+cat > .env <<EOF
+PG_PASSWORD=changeme
+CHROMA_TOKEN=changeme
+MCP_API_KEY=changeme
+EOF
 
 # Start all services (postgres, chromadb, todo-mcp)
 podman compose up -d
@@ -212,12 +222,19 @@ podman compose up -d
 For production deployment on systemd hosts:
 
 ```bash
-# Create podman secret
-echo "changeme" | podman secret create todo-pg-password -
+# Create podman secrets
+echo -n 'changeme' | podman secret create todo-pg-password -
+echo -n 'changeme' | podman secret create todo-chroma-token -
+echo -n 'changeme' | podman secret create todo-mcp-api-key -
 
 # Copy config
 mkdir -p ~/.config/todo
 cp deploy/production.yaml ~/.config/todo/production.yaml
+
+# (Optional) Add TLS certs
+mkdir -p ~/.config/todo/certs
+cp cert.pem key.pem ~/.config/todo/certs/
+# Then set tls_cert/tls_key paths in ~/.config/todo/production.yaml
 
 # Build container image
 podman build -t localhost/todo:latest .
@@ -230,7 +247,7 @@ systemctl --user daemon-reload
 systemctl --user start todo-mcp
 systemctl --user status todo-mcp
 
-# View logs
+# MCP HTTP server available at http://localhost:8082
 journalctl --user -u todo-mcp -f
 ```
 
@@ -255,14 +272,14 @@ go vet ./...
 ```
 model/              Task, Note, Link structs + error types
 config/             YAML config with viper
-store/              Store interface (26 methods)
+store/              Store interface (27 methods)
 store/gormstore/    GORM implementation (SQLite + PostgreSQL)
 store/synced/       VectorSyncer (StoreObserver + SemanticSearcher)
 embed/              Embedder interface + Ollama/OpenAI implementations
 vectorstore/        VectorStore interface + ChromaDB implementation
 audit/              Structured audit logger (StoreObserver)
 cmd/                Cobra CLI (20 command files)
-mcp/                MCP server (6 tool files, 27+ tools)
+mcp/                MCP server (8 files, 28 tools)
 deploy/             Container + quadlet deployment files
 ```
 

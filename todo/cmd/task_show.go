@@ -13,14 +13,14 @@ var taskShowCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
 			return err
 		}
 
-		detail, err := s.GetTask(id)
+		detail, err := s.GetTask(cmd.Context(), id)
 		if err != nil {
 			return err
 		}

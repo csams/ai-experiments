@@ -16,7 +16,7 @@ var taskCreateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		title := args[0]
 		desc, _ := cmd.Flags().GetString("description")
@@ -34,7 +34,7 @@ var taskCreateCmd = &cobra.Command{
 			dueAt = &utc
 		}
 
-		task, err := s.CreateTask(title, desc, priority, dueAt, tags)
+		task, err := s.CreateTask(cmd.Context(), title, desc, priority, dueAt, tags)
 		if err != nil {
 			return err
 		}

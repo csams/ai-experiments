@@ -15,14 +15,14 @@ var taskTagCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
 			return err
 		}
 
-		if err := s.AddTags(id, args[1:]); err != nil {
+		if err := s.AddTags(cmd.Context(), id, args[1:]); err != nil {
 			return err
 		}
 
@@ -40,14 +40,14 @@ var taskUntagCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
 			return err
 		}
 
-		if err := s.RemoveTags(id, args[1:]); err != nil {
+		if err := s.RemoveTags(cmd.Context(), id, args[1:]); err != nil {
 			return err
 		}
 

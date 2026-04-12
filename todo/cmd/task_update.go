@@ -17,7 +17,7 @@ var taskUpdateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
@@ -50,7 +50,7 @@ var taskUpdateCmd = &cobra.Command{
 			opts.DueAt = &utc
 		}
 
-		task, err := s.UpdateTask(id, opts)
+		task, err := s.UpdateTask(cmd.Context(), id, opts)
 		if err != nil {
 			return err
 		}

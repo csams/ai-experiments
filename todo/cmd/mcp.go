@@ -1,10 +1,14 @@
 package cmd
 
 import (
+	"context"
+	"crypto/subtle"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	todomcp "github.com/csams/todo/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -24,7 +28,7 @@ HTTP streamable transport (for remote / multi-client access).`,
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		// Set source for audit logging
 		transport, _ := cmd.Flags().GetString("transport")
@@ -38,10 +42,6 @@ HTTP streamable transport (for remote / multi-client access).`,
 		// Create MCP server with all tools
 		mcpServer := todomcp.NewServer(s, getSemanticSearcher())
 
-		// Graceful shutdown
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 		switch transport {
 		case "http":
 			addr, _ := cmd.Flags().GetString("addr")
@@ -49,13 +49,56 @@ HTTP streamable transport (for remote / multi-client access).`,
 				addr = cfg.MCP.Addr
 			}
 
-			httpServer := server.NewStreamableHTTPServer(mcpServer)
+			insecure, _ := cmd.Flags().GetBool("insecure")
+			if cfg.MCP.APIKey != "" && cfg.MCP.TLSCert == "" && !insecure {
+				return fmt.Errorf("API key auth requires TLS (set tls_cert/tls_key in config or via TODO_MCP_TLS_CERT/TODO_MCP_TLS_KEY env vars, or use --insecure for development)")
+			}
+			if cfg.MCP.APIKey != "" && cfg.MCP.TLSCert == "" && insecure {
+				logger.Warn("MCP API key auth enabled without TLS; tokens sent in cleartext (--insecure)")
+			}
 
+			if cfg.MCP.APIKey == "" {
+				logger.Warn("MCP HTTP server starting without authentication; all clients have full access")
+			}
+
+			var handler http.Handler
+			var opts []server.StreamableHTTPOption
+
+			if cfg.MCP.TLSCert != "" {
+				opts = append(opts, server.WithTLSCert(cfg.MCP.TLSCert, cfg.MCP.TLSKey))
+			}
+
+			mux := http.NewServeMux()
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handler.ServeHTTP(w, r)
+			})
+
+			if cfg.MCP.APIKey != "" {
+				mux.Handle("/mcp", bearerAuthMiddleware(cfg.MCP.APIKey, inner))
+			} else {
+				mux.Handle("/mcp", inner)
+			}
+
+			opts = append(opts, server.WithStreamableHTTPServer(&http.Server{
+				Handler:           mux,
+				ReadHeaderTimeout: 10 * time.Second,
+				IdleTimeout:       120 * time.Second,
+				MaxHeaderBytes:    1 << 20, // 1MB
+			}))
+
+			httpServer := server.NewStreamableHTTPServer(mcpServer, opts...)
+			handler = httpServer
+
+			// Graceful shutdown: signal triggers httpServer.Shutdown, which
+			// causes httpServer.Start to return, then defer s.Close runs.
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 			go func() {
 				<-sigCh
 				logger.Info("shutting down MCP HTTP server")
-				s.Close()
-				os.Exit(0)
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				httpServer.Shutdown(shutdownCtx)
 			}()
 
 			logger.Info("starting MCP HTTP server", "addr", addr)
@@ -63,20 +106,28 @@ HTTP streamable transport (for remote / multi-client access).`,
 			return httpServer.Start(addr)
 
 		default: // stdio
-			go func() {
-				<-sigCh
-				logger.Info("shutting down MCP stdio server")
-				s.Close()
-				os.Exit(0)
-			}()
-
+			// ServeStdio handles SIGINT/SIGTERM internally — it cancels its
+			// context and Listen returns. Then defer s.Close runs naturally.
 			return server.ServeStdio(mcpServer)
 		}
 	},
 }
 
+func bearerAuthMiddleware(apiKey string, next http.Handler) http.Handler {
+	expected := []byte("Bearer " + apiKey)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := []byte(r.Header.Get("Authorization"))
+		if subtle.ConstantTimeCompare(auth, expected) != 1 {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func init() {
 	mcpCmd.Flags().String("transport", "", "transport: stdio (default) or http")
 	mcpCmd.Flags().String("addr", "", "listen address for HTTP transport (default from config)")
+	mcpCmd.Flags().Bool("insecure", false, "allow API key auth without TLS (development only)")
 	rootCmd.AddCommand(mcpCmd)
 }

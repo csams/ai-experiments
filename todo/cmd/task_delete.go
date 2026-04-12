@@ -15,7 +15,7 @@ var taskDeleteCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer s.Close(cmd.Context())
 
 		id, err := parseTaskID(args[0])
 		if err != nil {
@@ -24,7 +24,7 @@ var taskDeleteCmd = &cobra.Command{
 
 		recursive, _ := cmd.Flags().GetBool("recursive")
 
-		if err := s.DeleteTask(id, recursive); err != nil {
+		if err := s.DeleteTask(cmd.Context(), id, recursive); err != nil {
 			return err
 		}
 

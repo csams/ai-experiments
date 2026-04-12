@@ -6,12 +6,17 @@ Requires=postgres.service chromadb.service
 [Container]
 Image=localhost/todo:latest
 ContainerName=todo-mcp
-Network=todo.network
-Exec=mcp --transport http --addr :8080
-Environment=TODO_CONFIG=/etc/todo/config.yaml
+Network=todo-db.network
+Network=todo-vector.network
+Exec=mcp --config /etc/todo/config.yaml --transport http --addr :8080
+ReadOnly=true
+Tmpfs=/tmp
 Volume=%h/.config/todo/production.yaml:/etc/todo/config.yaml:ro,Z
-Secret=todo-pg-password,type=env,target=PGPASSWORD
-PublishPort=8080:8080
+Secret=todo-pg-password,type=env,target=TODO_DB_POSTGRES_PASSWORD
+Secret=todo-chroma-token,type=env,target=TODO_VECTOR_CHROMADB_AUTH_TOKEN
+Secret=todo-mcp-api-key,type=env,target=TODO_MCP_API_KEY
+Volume=%h/.config/todo/certs:/etc/todo/certs:ro,Z
+PublishPort=8082:8080
 
 [Service]
 Restart=always

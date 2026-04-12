@@ -2,8 +2,11 @@ package gormstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -14,7 +17,8 @@ import (
 	"gorm.io/gorm"
 )
 
-const maxBulkIDs = 100
+const maxBulkIDs       = 100
+const defaultQueryLimit = 200
 
 var tagRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
@@ -24,6 +28,7 @@ type GormStore struct {
 	observers []store.StoreObserver
 	mu        sync.RWMutex // protects observers slice
 	source    string       // "cli", "mcp-stdio", "mcp-http"
+	syncEmit  bool         // if true, call observers synchronously (for tests)
 }
 
 // New creates a GormStore, runs migrations, and returns it.
@@ -41,8 +46,16 @@ func New(db *gorm.DB) (*GormStore, error) {
 }
 
 // SetSource sets the source identifier for audit events.
+// Called from cmd/mcp.go to tag events with the transport type.
 func (s *GormStore) SetSource(source string) {
 	s.source = source
+}
+
+// SetSyncEmit controls whether observer callbacks are called synchronously.
+// When true (used in tests), observers are called inline; when false (default,
+// used in production), observers run in goroutines with timeout and panic recovery.
+func (s *GormStore) SetSyncEmit(sync bool) {
+	s.syncEmit = sync
 }
 
 // AddObserver registers an observer to receive store events.
@@ -52,17 +65,30 @@ func (s *GormStore) AddObserver(o store.StoreObserver) {
 	s.observers = append(s.observers, o)
 }
 
-func (s *GormStore) emit(event store.StoreEvent) {
+func (s *GormStore) emit(ctx context.Context, event store.StoreEvent) {
 	event.Source = s.source
 	s.mu.RLock()
 	observers := s.observers
 	s.mu.RUnlock()
 	for _, o := range observers {
-		o.OnEvent(context.Background(), event)
+		if s.syncEmit {
+			o.OnEvent(ctx, event)
+		} else {
+			go func(obs store.StoreObserver) {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("observer panic", "panic", r, "stack", string(debug.Stack()))
+					}
+				}()
+				obsCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				defer cancel()
+				obs.OnEvent(obsCtx, event)
+			}(o)
+		}
 	}
 }
 
-func (s *GormStore) Close() error {
+func (s *GormStore) Close(ctx context.Context) error {
 	sqlDB, err := s.db.DB()
 	if err != nil {
 		return err
@@ -83,15 +109,8 @@ func validateTitle(title string) error {
 	if strings.TrimSpace(title) == "" {
 		return &model.ValidationError{Field: "title", Message: "required and non-empty"}
 	}
-	if len(title) > 500 {
-		return &model.ValidationError{Field: "title", Message: "max 500 characters"}
-	}
-	return nil
-}
-
-func validateDescription(desc string) error {
-	if len(desc) > 10000 {
-		return &model.ValidationError{Field: "description", Message: "max 10000 characters"}
+	if len(title) > 512 {
+		return &model.ValidationError{Field: "title", Message: "max 512 characters"}
 	}
 	return nil
 }
@@ -122,9 +141,6 @@ func validateNoteText(text string) error {
 	if strings.TrimSpace(text) == "" {
 		return &model.ValidationError{Field: "text", Message: "required and non-empty"}
 	}
-	if len(text) > 50000 {
-		return &model.ValidationError{Field: "text", Message: "max 50000 characters"}
-	}
 	return nil
 }
 
@@ -148,17 +164,37 @@ func validateSearchQuery(q string) error {
 	return nil
 }
 
+// --- LIKE wildcard escaping ---
+
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // --- Task existence helper ---
 
 func (s *GormStore) taskExists(tx *gorm.DB, id uint) (*model.Task, error) {
 	var task model.Task
 	if err := tx.First(&task, id).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("task %d: %w", id, model.ErrNotFound)
 		}
 		return nil, err
 	}
 	return &task, nil
+}
+
+func (s *GormStore) taskExistsActive(tx *gorm.DB, id uint) (*model.Task, error) {
+	task, err := s.taskExists(tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if task.Archived {
+		return nil, fmt.Errorf("task %d: %w", id, model.ErrArchived)
+	}
+	return task, nil
 }
 
 // --- Subtree collection via recursive CTE ---
@@ -179,40 +215,52 @@ func (s *GormStore) collectSubtreeIDs(tx *gorm.DB, rootID uint) ([]uint, error) 
 
 // hasBlockingCycle checks if adding "blockerID blocks taskID" would create a cycle.
 // A cycle exists if taskID already transitively blocks blockerID.
-func (s *GormStore) hasBlockingCycle(tx *gorm.DB, taskID, blockerID uint) (bool, []uint) {
+func (s *GormStore) hasBlockingCycle(tx *gorm.DB, taskID, blockerID uint) (bool, []uint, error) {
 	// Walk from blockerID upward through its own blockers to see if we reach taskID.
 	// "blockerID's blockers" are tasks that block the blocker.
-	visited := map[uint]bool{blockerID: true}
+	visited := map[uint]bool{}
+	parent := map[uint]uint{}
 	queue := []uint{blockerID}
-	path := []uint{blockerID}
+	visited[blockerID] = true
 
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
 
 		// Find what blocks `current`
-		var blockerIDs []uint
-		tx.Model(&model.TaskBlocker{}).
-			Where("task_id = ?", current).
-			Pluck("blocker_id", &blockerIDs)
-
-		for _, bid := range blockerIDs {
-			if bid == taskID {
-				return true, append(path, taskID)
+		var upstreamBlockers []model.TaskBlocker
+		if err := tx.Where("task_id = ?", current).Find(&upstreamBlockers).Error; err != nil {
+			return false, nil, fmt.Errorf("cycle detection query: %w", err)
+		}
+		for _, b := range upstreamBlockers {
+			if b.BlockerID == taskID {
+				// Found cycle. Reconstruct path from blockerID to current via parent map,
+				// then append taskID to close the cycle.
+				var path []uint
+				at := current
+				for at != blockerID {
+					path = append([]uint{at}, path...)
+					at = parent[at]
+				}
+				path = append([]uint{blockerID}, path...)
+				// The cycle: taskID -> blockerID -> ... -> current -> taskID
+				path = append([]uint{taskID}, path...)
+				path = append(path, taskID)
+				return true, path, nil
 			}
-			if !visited[bid] {
-				visited[bid] = true
-				queue = append(queue, bid)
-				path = append(path, bid)
+			if !visited[b.BlockerID] {
+				visited[b.BlockerID] = true
+				parent[b.BlockerID] = current
+				queue = append(queue, b.BlockerID)
 			}
 		}
 	}
-	return false, nil
+	return false, nil, nil
 }
 
 // --- Parent cycle detection ---
 
-func (s *GormStore) hasParentCycle(tx *gorm.DB, taskID, parentID uint) (bool, []uint) {
+func (s *GormStore) hasParentCycle(tx *gorm.DB, taskID, parentID uint) (bool, []uint, error) {
 	// Walk from parentID upward to check if taskID is an ancestor.
 	current := parentID
 	path := []uint{taskID, parentID}
@@ -221,16 +269,19 @@ func (s *GormStore) hasParentCycle(tx *gorm.DB, taskID, parentID uint) (bool, []
 	for {
 		var task model.Task
 		if err := tx.Select("parent_id").First(&task, current).Error; err != nil {
-			return false, nil
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return false, nil, nil
+			}
+			return false, nil, fmt.Errorf("cycle detection query: %w", err)
 		}
 		if task.ParentID == nil {
-			return false, nil
+			return false, nil, nil
 		}
 		if *task.ParentID == taskID {
-			return true, append(path, taskID)
+			return true, append(path, taskID), nil
 		}
 		if visited[*task.ParentID] {
-			return true, append(path, *task.ParentID)
+			return true, append(path, *task.ParentID), nil
 		}
 		visited[*task.ParentID] = true
 		path = append(path, *task.ParentID)
@@ -254,7 +305,10 @@ func (s *GormStore) propagatePriorityUp(tx *gorm.DB, taskID uint, priority int) 
 	for _, bid := range blockerIDs {
 		var blocker model.Task
 		if err := tx.First(&blocker, bid).Error; err != nil {
-			continue
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				continue
+			}
+			return err
 		}
 		if blocker.Priority > priority {
 			if err := tx.Model(&blocker).Update("priority", priority).Error; err != nil {
@@ -319,11 +373,8 @@ func (s *GormStore) checkExternalBlockers(tx *gorm.DB, taskIDs []uint) error {
 
 // --- CRUD: Tasks ---
 
-func (s *GormStore) CreateTask(title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error) {
+func (s *GormStore) CreateTask(ctx context.Context, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error) {
 	if err := validateTitle(title); err != nil {
-		return nil, err
-	}
-	if err := validateDescription(description); err != nil {
 		return nil, err
 	}
 	if err := validateTags(tags); err != nil {
@@ -338,7 +389,8 @@ func (s *GormStore) CreateTask(title, description string, priority int, dueAt *t
 		DueAt:       dueAt,
 	}
 
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	db := s.db.WithContext(ctx)
+	err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&task).Error; err != nil {
 			return err
 		}
@@ -355,9 +407,11 @@ func (s *GormStore) CreateTask(title, description string, priority int, dueAt *t
 	}
 
 	// Reload with tags
-	s.db.Preload("Tags").First(&task, task.ID)
+	if err := db.Preload("Tags").First(&task, task.ID).Error; err != nil {
+		return nil, fmt.Errorf("reload task %d: %w", task.ID, err)
+	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "task.created",
 		TaskIDs: []uint{task.ID},
 	})
@@ -365,13 +419,67 @@ func (s *GormStore) CreateTask(title, description string, priority int, dueAt *t
 	return &task, nil
 }
 
-func (s *GormStore) GetTask(id uint) (*model.TaskDetail, error) {
+func (s *GormStore) CreateSubtask(ctx context.Context, parentID uint, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error) {
+	if err := validateID(parentID); err != nil {
+		return nil, err
+	}
+	if err := validateTitle(title); err != nil {
+		return nil, err
+	}
+	if err := validateTags(tags); err != nil {
+		return nil, err
+	}
+
+	task := model.Task{
+		Title:       title,
+		Description: description,
+		Priority:    priority,
+		State:       model.StateNew,
+		DueAt:       dueAt,
+		ParentID:    &parentID,
+	}
+
+	db := s.db.WithContext(ctx)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.taskExistsActive(tx, parentID); err != nil {
+			return err
+		}
+		if err := tx.Create(&task).Error; err != nil {
+			return err
+		}
+		for _, tag := range tags {
+			tt := model.TaskTag{TaskID: task.ID, Tag: tag}
+			if err := tx.Create(&tt).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Reload with tags
+	if err := db.Preload("Tags").First(&task, task.ID).Error; err != nil {
+		return nil, fmt.Errorf("reload task %d: %w", task.ID, err)
+	}
+
+	s.emit(ctx, store.StoreEvent{
+		Type:    "task.created",
+		TaskIDs: []uint{task.ID},
+	})
+
+	return &task, nil
+}
+
+func (s *GormStore) GetTask(ctx context.Context, id uint) (*model.TaskDetail, error) {
 	if err := validateID(id); err != nil {
 		return nil, err
 	}
 
+	db := s.db.WithContext(ctx)
 	var task model.Task
-	err := s.db.
+	err := db.
 		Preload("Notes").
 		Preload("Blockers").
 		Preload("Tags").
@@ -380,7 +488,7 @@ func (s *GormStore) GetTask(id uint) (*model.TaskDetail, error) {
 		Preload("Parent").
 		First(&task, id).Error
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("task %d: %w", id, model.ErrNotFound)
 		}
 		return nil, err
@@ -389,11 +497,15 @@ func (s *GormStore) GetTask(id uint) (*model.TaskDetail, error) {
 	// Compute blocking list (tasks this one blocks)
 	var blocking []model.Task
 	var blockedTaskIDs []uint
-	s.db.Model(&model.TaskBlocker{}).
+	if err := db.Model(&model.TaskBlocker{}).
 		Where("blocker_id = ?", id).
-		Pluck("task_id", &blockedTaskIDs)
+		Pluck("task_id", &blockedTaskIDs).Error; err != nil {
+		return nil, err
+	}
 	if len(blockedTaskIDs) > 0 {
-		s.db.Where("id IN ?", blockedTaskIDs).Find(&blocking)
+		if err := db.Where("id IN ?", blockedTaskIDs).Find(&blocking).Error; err != nil {
+			return nil, err
+		}
 	}
 
 	return &model.TaskDetail{
@@ -402,15 +514,16 @@ func (s *GormStore) GetTask(id uint) (*model.TaskDetail, error) {
 	}, nil
 }
 
-func (s *GormStore) ListTasks(opts store.ListTasksOptions) ([]model.Task, error) {
-	q := s.db.Model(&model.Task{}).Preload("Tags")
+func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) ([]model.Task, error) {
+	db := s.db.WithContext(ctx)
+	q := db.Model(&model.Task{}).Preload("Tags")
 
 	// ParentID implies IncludeSubtasks
 	if opts.ParentID != nil {
 		if err := validateID(*opts.ParentID); err != nil {
 			return nil, err
 		}
-		subtreeIDs, err := s.collectSubtreeIDs(s.db, *opts.ParentID)
+		subtreeIDs, err := s.collectSubtreeIDs(db, *opts.ParentID)
 		if err != nil {
 			return nil, err
 		}
@@ -446,6 +559,16 @@ func (s *GormStore) ListTasks(opts store.ListTasksOptions) ([]model.Task, error)
 		q = q.Order("priority ASC, created_at DESC")
 	}
 
+	// Pagination
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = defaultQueryLimit
+	}
+	q = q.Limit(limit)
+	if opts.Offset > 0 {
+		q = q.Offset(opts.Offset)
+	}
+
 	var tasks []model.Task
 	if err := q.Find(&tasks).Error; err != nil {
 		return nil, err
@@ -453,22 +576,27 @@ func (s *GormStore) ListTasks(opts store.ListTasksOptions) ([]model.Task, error)
 	return tasks, nil
 }
 
-func (s *GormStore) UpdateTask(id uint, opts store.UpdateTaskOptions) (*model.Task, error) {
+func (s *GormStore) UpdateTask(ctx context.Context, id uint, opts store.UpdateTaskOptions) (*model.Task, error) {
 	if err := validateID(id); err != nil {
 		return nil, err
 	}
 
+	db := s.db.WithContext(ctx)
 	var task model.Task
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	var changes map[string]store.Change
+	err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.First(&task, id).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("task %d: %w", id, model.ErrNotFound)
 			}
 			return err
 		}
+		if task.Archived {
+			return model.ErrArchived
+		}
 
 		updates := map[string]any{}
-		changes := map[string]store.Change{}
+		changes = map[string]store.Change{}
 
 		if opts.Title != nil {
 			if err := validateTitle(*opts.Title); err != nil {
@@ -478,9 +606,6 @@ func (s *GormStore) UpdateTask(id uint, opts store.UpdateTaskOptions) (*model.Ta
 			updates["title"] = *opts.Title
 		}
 		if opts.Description != nil {
-			if err := validateDescription(*opts.Description); err != nil {
-				return err
-			}
 			changes["description"] = store.Change{Old: task.Description, New: *opts.Description}
 			updates["description"] = *opts.Description
 		}
@@ -525,15 +650,18 @@ func (s *GormStore) UpdateTask(id uint, opts store.UpdateTaskOptions) (*model.Ta
 		return nil, err
 	}
 
-	s.emit(store.StoreEvent{
-		Type:    "task.updated",
-		TaskIDs: []uint{id},
-	})
+	if len(changes) > 0 {
+		s.emit(ctx, store.StoreEvent{
+			Type:    "task.updated",
+			TaskIDs: []uint{id},
+			Changes: changes,
+		})
+	}
 
 	return &task, nil
 }
 
-func (s *GormStore) SetTaskState(id uint, state model.TaskState) (*model.Task, error) {
+func (s *GormStore) SetTaskState(ctx context.Context, id uint, state model.TaskState) (*model.Task, error) {
 	if err := validateID(id); err != nil {
 		return nil, err
 	}
@@ -544,10 +672,13 @@ func (s *GormStore) SetTaskState(id uint, state model.TaskState) (*model.Task, e
 		return nil, &model.ValidationError{Field: "state", Message: fmt.Sprintf("invalid state: %s", state)}
 	}
 
+	db := s.db.WithContext(ctx)
 	var task model.Task
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	var oldState model.TaskState
+	affectedIDs := []uint{id}
+	err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.First(&task, id).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("task %d: %w", id, model.ErrNotFound)
 			}
 			return err
@@ -556,7 +687,7 @@ func (s *GormStore) SetTaskState(id uint, state model.TaskState) (*model.Task, e
 			return model.ErrArchived
 		}
 
-		oldState := task.State
+		oldState = task.State
 
 		// Clear blocker entries for this task
 		if err := tx.Where("task_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
@@ -581,10 +712,15 @@ func (s *GormStore) SetTaskState(id uint, state model.TaskState) (*model.Task, e
 			// Auto-unblock tasks with zero remaining blockers
 			for _, btid := range blockedTaskIDs {
 				var count int64
-				tx.Model(&model.TaskBlocker{}).Where("task_id = ?", btid).Count(&count)
+				if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", btid).Count(&count).Error; err != nil {
+					return err
+				}
 				if count == 0 {
-					tx.Model(&model.Task{}).Where("id = ? AND state = ?", btid, model.StateBlocked).
-						Update("state", model.StateUnblocked)
+					if err := tx.Model(&model.Task{}).Where("id = ? AND state = ?", btid, model.StateBlocked).
+						Update("state", model.StateUnblocked).Error; err != nil {
+						return err
+					}
+					affectedIDs = append(affectedIDs, btid)
 				}
 			}
 		}
@@ -594,30 +730,32 @@ func (s *GormStore) SetTaskState(id uint, state model.TaskState) (*model.Task, e
 			return err
 		}
 
-		_ = oldState // used for event
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "task.state_changed",
-		TaskIDs: []uint{id},
-		Changes: map[string]store.Change{"state": {Old: string(task.State), New: string(state)}},
+		TaskIDs: affectedIDs,
+		Changes: map[string]store.Change{"state": {Old: string(oldState), New: string(state)}},
 	})
 
-	s.db.First(&task, id) // reload
+	if err := db.First(&task, id).Error; err != nil {
+		return nil, fmt.Errorf("reload task %d: %w", id, err)
+	}
 	return &task, nil
 }
 
-func (s *GormStore) AddBlockers(taskID uint, blockerIDs []uint) (*model.Task, error) {
+func (s *GormStore) AddBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error) {
 	if err := validateID(taskID); err != nil {
 		return nil, err
 	}
 
+	db := s.db.WithContext(ctx)
 	var task model.Task
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		t, err := s.taskExists(tx, taskID)
 		if err != nil {
 			return err
@@ -647,7 +785,11 @@ func (s *GormStore) AddBlockers(taskID uint, blockerIDs []uint) (*model.Task, er
 			}
 
 			// Cycle detection
-			if hasCycle, path := s.hasBlockingCycle(tx, taskID, bid); hasCycle {
+			hasCycle, path, err := s.hasBlockingCycle(tx, taskID, bid)
+			if err != nil {
+				return err
+			}
+			if hasCycle {
 				return &model.CycleDetectedError{Path: path}
 			}
 
@@ -675,37 +817,46 @@ func (s *GormStore) AddBlockers(taskID uint, blockerIDs []uint) (*model.Task, er
 		return nil, err
 	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "task.blockers_added",
 		TaskIDs: []uint{taskID},
 	})
 
-	s.db.Preload("Blockers").First(&task, taskID)
+	if err := db.Preload("Blockers").First(&task, taskID).Error; err != nil {
+		return nil, fmt.Errorf("reload task %d: %w", taskID, err)
+	}
 	return &task, nil
 }
 
-func (s *GormStore) RemoveBlockers(taskID uint, blockerIDs []uint) (*model.Task, error) {
+func (s *GormStore) RemoveBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error) {
 	if err := validateID(taskID); err != nil {
 		return nil, err
 	}
 
+	db := s.db.WithContext(ctx)
 	var task model.Task
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExists(tx, taskID); err != nil {
 			return err
 		}
 
 		for _, bid := range blockerIDs {
-			tx.Where("task_id = ? AND blocker_id = ?", taskID, bid).Delete(&model.TaskBlocker{})
+			if err := tx.Where("task_id = ? AND blocker_id = ?", taskID, bid).Delete(&model.TaskBlocker{}).Error; err != nil {
+				return err
+			}
 		}
 
 		// Check remaining blockers
 		var count int64
-		tx.Model(&model.TaskBlocker{}).Where("task_id = ?", taskID).Count(&count)
+		if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", taskID).Count(&count).Error; err != nil {
+			return err
+		}
 		if count == 0 {
 			// Auto-transition to Unblocked if currently Blocked
-			tx.Model(&model.Task{}).Where("id = ? AND state = ?", taskID, model.StateBlocked).
-				Update("state", model.StateUnblocked)
+			if err := tx.Model(&model.Task{}).Where("id = ? AND state = ?", taskID, model.StateBlocked).
+				Update("state", model.StateUnblocked).Error; err != nil {
+				return err
+			}
 		}
 
 		return tx.First(&task, taskID).Error
@@ -714,7 +865,7 @@ func (s *GormStore) RemoveBlockers(taskID uint, blockerIDs []uint) (*model.Task,
 		return nil, err
 	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "task.blockers_removed",
 		TaskIDs: []uint{taskID},
 	})
@@ -722,12 +873,13 @@ func (s *GormStore) RemoveBlockers(taskID uint, blockerIDs []uint) (*model.Task,
 	return &task, nil
 }
 
-func (s *GormStore) SetParent(id uint, parentID *uint) error {
+func (s *GormStore) SetParent(ctx context.Context, id uint, parentID *uint) error {
 	if err := validateID(id); err != nil {
 		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	db := s.db.WithContext(ctx)
+	err := db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExists(tx, id); err != nil {
 			return err
 		}
@@ -746,21 +898,38 @@ func (s *GormStore) SetParent(id uint, parentID *uint) error {
 			return err
 		}
 
-		if hasCycle, path := s.hasParentCycle(tx, id, *parentID); hasCycle {
+		hasCycle, path, err := s.hasParentCycle(tx, id, *parentID)
+		if err != nil {
+			return err
+		}
+		if hasCycle {
 			return &model.CycleDetectedError{Path: path}
 		}
 
 		return tx.Model(&model.Task{}).Where("id = ?", id).Update("parent_id", *parentID).Error
 	})
+	if err != nil {
+		return err
+	}
+
+	s.emit(ctx, store.StoreEvent{
+		Type:    "task.parent_changed",
+		TaskIDs: []uint{id},
+	})
+
+	return nil
 }
 
-func (s *GormStore) ArchiveTask(id uint, archived bool) error {
+func (s *GormStore) ArchiveTask(ctx context.Context, id uint, archived bool) error {
 	if err := validateID(id); err != nil {
 		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		subtreeIDs, err := s.collectSubtreeIDs(tx, id)
+	db := s.db.WithContext(ctx)
+	var subtreeIDs []uint
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		subtreeIDs, err = s.collectSubtreeIDs(tx, id)
 		if err != nil {
 			return err
 		}
@@ -774,41 +943,66 @@ func (s *GormStore) ArchiveTask(id uint, archived bool) error {
 			// On unarchive, validate preserved blocker relationships
 			for _, tid := range subtreeIDs {
 				var blockerIDs []uint
-				tx.Model(&model.TaskBlocker{}).Where("task_id = ?", tid).Pluck("blocker_id", &blockerIDs)
+				if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", tid).Pluck("blocker_id", &blockerIDs).Error; err != nil {
+					return err
+				}
 				for _, bid := range blockerIDs {
 					var blocker model.Task
 					if err := tx.First(&blocker, bid).Error; err != nil {
 						// Blocker no longer exists — clean up
-						tx.Where("task_id = ? AND blocker_id = ?", tid, bid).Delete(&model.TaskBlocker{})
+						if err := tx.Where("task_id = ? AND blocker_id = ?", tid, bid).Delete(&model.TaskBlocker{}).Error; err != nil {
+							return err
+						}
 						continue
 					}
-					if blocker.State == model.StateDone {
-						// Blocker is Done — clean up
-						tx.Where("task_id = ? AND blocker_id = ?", tid, bid).Delete(&model.TaskBlocker{})
+					if blocker.State == model.StateDone || blocker.Archived {
+						// Blocker is Done or Archived — clean up
+						if err := tx.Where("task_id = ? AND blocker_id = ?", tid, bid).Delete(&model.TaskBlocker{}).Error; err != nil {
+							return err
+						}
 					}
 				}
 				// If task was Blocked and has no more blockers, transition to Unblocked
 				var remaining int64
-				tx.Model(&model.TaskBlocker{}).Where("task_id = ?", tid).Count(&remaining)
+				if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", tid).Count(&remaining).Error; err != nil {
+					return err
+				}
 				if remaining == 0 {
-					tx.Model(&model.Task{}).Where("id = ? AND state = ?", tid, model.StateBlocked).
-						Update("state", model.StateUnblocked)
+					if err := tx.Model(&model.Task{}).Where("id = ? AND state = ?", tid, model.StateBlocked).
+						Update("state", model.StateUnblocked).Error; err != nil {
+						return err
+					}
 				}
 			}
 		}
 
 		return tx.Model(&model.Task{}).Where("id IN ?", subtreeIDs).Update("archived", archived).Error
 	})
+	if err != nil {
+		return err
+	}
+
+	eventType := "task.archived"
+	if !archived {
+		eventType = "task.unarchived"
+	}
+	s.emit(ctx, store.StoreEvent{
+		Type:    eventType,
+		TaskIDs: subtreeIDs,
+	})
+
+	return nil
 }
 
-func (s *GormStore) DeleteTask(id uint, recursive bool) error {
+func (s *GormStore) DeleteTask(ctx context.Context, id uint, recursive bool) error {
 	if err := validateID(id); err != nil {
 		return err
 	}
 
+	db := s.db.WithContext(ctx)
 	var deletedIDs []uint
 
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExists(tx, id); err != nil {
 			return err
 		}
@@ -826,7 +1020,9 @@ func (s *GormStore) DeleteTask(id uint, recursive bool) error {
 
 			// Delete all related data for the subtree
 			for _, tid := range subtreeIDs {
-				s.deleteTaskData(tx, tid)
+				if err := s.deleteTaskData(tx, tid); err != nil {
+					return err
+				}
 			}
 
 			deletedIDs = subtreeIDs
@@ -845,10 +1041,14 @@ func (s *GormStore) DeleteTask(id uint, recursive bool) error {
 
 		// Find tasks blocked by this task (before we delete blocker entries)
 		var blockedByMe []uint
-		tx.Model(&model.TaskBlocker{}).Where("blocker_id = ?", id).Pluck("task_id", &blockedByMe)
+		if err := tx.Model(&model.TaskBlocker{}).Where("blocker_id = ?", id).Pluck("task_id", &blockedByMe).Error; err != nil {
+			return err
+		}
 
 		// Delete task data
-		s.deleteTaskData(tx, id)
+		if err := s.deleteTaskData(tx, id); err != nil {
+			return err
+		}
 
 		if err := tx.Delete(&model.Task{}, id).Error; err != nil {
 			return err
@@ -857,10 +1057,14 @@ func (s *GormStore) DeleteTask(id uint, recursive bool) error {
 		// Auto-unblock tasks that lost their last blocker
 		for _, btid := range blockedByMe {
 			var count int64
-			tx.Model(&model.TaskBlocker{}).Where("task_id = ?", btid).Count(&count)
+			if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", btid).Count(&count).Error; err != nil {
+				return err
+			}
 			if count == 0 {
-				tx.Model(&model.Task{}).Where("id = ? AND state = ?", btid, model.StateBlocked).
-					Update("state", model.StateUnblocked)
+				if err := tx.Model(&model.Task{}).Where("id = ? AND state = ?", btid, model.StateBlocked).
+					Update("state", model.StateUnblocked).Error; err != nil {
+					return err
+				}
 			}
 		}
 
@@ -871,7 +1075,7 @@ func (s *GormStore) DeleteTask(id uint, recursive bool) error {
 		return err
 	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "task.deleted",
 		TaskIDs: deletedIDs,
 	})
@@ -880,59 +1084,77 @@ func (s *GormStore) DeleteTask(id uint, recursive bool) error {
 }
 
 // deleteTaskData removes all associated data for a single task (not the task itself).
-func (s *GormStore) deleteTaskData(tx *gorm.DB, taskID uint) {
-	tx.Where("task_id = ?", taskID).Delete(&model.Note{})
-	tx.Where("task_id = ?", taskID).Delete(&model.Link{})
-	tx.Where("task_id = ?", taskID).Delete(&model.TaskTag{})
-	tx.Where("task_id = ? OR blocker_id = ?", taskID, taskID).Delete(&model.TaskBlocker{})
+func (s *GormStore) deleteTaskData(tx *gorm.DB, taskID uint) error {
+	if err := tx.Where("task_id = ?", taskID).Delete(&model.Note{}).Error; err != nil {
+		return err
+	}
+	if err := tx.Where("task_id = ?", taskID).Delete(&model.Link{}).Error; err != nil {
+		return err
+	}
+	if err := tx.Where("task_id = ?", taskID).Delete(&model.TaskTag{}).Error; err != nil {
+		return err
+	}
+	if err := tx.Where("task_id = ? OR blocker_id = ?", taskID, taskID).Delete(&model.TaskBlocker{}).Error; err != nil {
+		return err
+	}
+	return nil
 }
 
 // --- Search ---
 
-func (s *GormStore) SearchTasks(query string) ([]model.Task, error) {
+func (s *GormStore) SearchTasks(ctx context.Context, query string) ([]model.Task, error) {
 	if err := validateSearchQuery(query); err != nil {
 		return nil, err
 	}
-	pattern := "%" + strings.ToLower(query) + "%"
+	db := s.db.WithContext(ctx)
+	pattern := "%" + escapeLike(strings.ToLower(query)) + "%"
 	var tasks []model.Task
-	err := s.db.Where("LOWER(title) LIKE ? OR LOWER(description) LIKE ?", pattern, pattern).
+	err := db.Where("LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(description) LIKE ? ESCAPE '\\'", pattern, pattern).
 		Order("priority ASC").
+		Limit(defaultQueryLimit).
 		Find(&tasks).Error
 	return tasks, err
 }
 
-func (s *GormStore) SearchNotes(query string) ([]model.Note, error) {
+func (s *GormStore) SearchNotes(ctx context.Context, query string) ([]model.Note, error) {
 	if err := validateSearchQuery(query); err != nil {
 		return nil, err
 	}
-	pattern := "%" + strings.ToLower(query) + "%"
+	db := s.db.WithContext(ctx)
+	pattern := "%" + escapeLike(strings.ToLower(query)) + "%"
 	var notes []model.Note
-	err := s.db.Where("LOWER(text) LIKE ?", pattern).Find(&notes).Error
+	err := db.Where("LOWER(text) LIKE ? ESCAPE '\\'", pattern).Limit(defaultQueryLimit).Find(&notes).Error
 	return notes, err
 }
 
 // --- Bulk operations ---
 
-func (s *GormStore) BulkUpdateState(ids []uint, state model.TaskState) ([]model.Task, error) {
+func (s *GormStore) BulkUpdateState(ctx context.Context, ids []uint, state model.TaskState) ([]model.Task, error) {
 	if len(ids) > maxBulkIDs {
 		return nil, &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
 	}
 	if state == model.StateBlocked {
 		return nil, fmt.Errorf("use AddBlockers for Blocked state: %w", model.ErrInvalidState)
 	}
+	if !model.ValidTaskStates[state] {
+		return nil, &model.ValidationError{Field: "state", Message: "invalid state"}
+	}
 
 	// Process in ascending ID order
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 
+	db := s.db.WithContext(ctx)
 	var results []model.Task
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	affectedIDs := make([]uint, len(ids))
+	copy(affectedIDs, ids)
+	err := db.Transaction(func(tx *gorm.DB) error {
 		for _, id := range ids {
 			if err := validateID(id); err != nil {
 				return err
 			}
 			var task model.Task
 			if err := tx.First(&task, id).Error; err != nil {
-				if err == gorm.ErrRecordNotFound {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
 					return fmt.Errorf("task %d: %w", id, model.ErrNotFound)
 				}
 				return err
@@ -942,25 +1164,40 @@ func (s *GormStore) BulkUpdateState(ids []uint, state model.TaskState) ([]model.
 			}
 
 			// Clear blockers
-			tx.Where("task_id = ?", id).Delete(&model.TaskBlocker{})
+			if err := tx.Where("task_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
+				return err
+			}
 
 			// Done cascade
 			if state == model.StateDone {
 				var blockedTaskIDs []uint
-				tx.Model(&model.TaskBlocker{}).Where("blocker_id = ?", id).Pluck("task_id", &blockedTaskIDs)
-				tx.Where("blocker_id = ?", id).Delete(&model.TaskBlocker{})
+				if err := tx.Model(&model.TaskBlocker{}).Where("blocker_id = ?", id).Pluck("task_id", &blockedTaskIDs).Error; err != nil {
+					return err
+				}
+				if err := tx.Where("blocker_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
+					return err
+				}
 				for _, btid := range blockedTaskIDs {
 					var count int64
-					tx.Model(&model.TaskBlocker{}).Where("task_id = ?", btid).Count(&count)
+					if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", btid).Count(&count).Error; err != nil {
+						return err
+					}
 					if count == 0 {
-						tx.Model(&model.Task{}).Where("id = ? AND state = ?", btid, model.StateBlocked).
-							Update("state", model.StateUnblocked)
+						if err := tx.Model(&model.Task{}).Where("id = ? AND state = ?", btid, model.StateBlocked).
+							Update("state", model.StateUnblocked).Error; err != nil {
+							return err
+						}
+						affectedIDs = append(affectedIDs, btid)
 					}
 				}
 			}
 
-			tx.Model(&task).Update("state", state)
-			tx.First(&task, id)
+			if err := tx.Model(&task).Update("state", state).Error; err != nil {
+				return err
+			}
+			if err := tx.First(&task, id).Error; err != nil {
+				return err
+			}
 			results = append(results, task)
 		}
 		return nil
@@ -969,28 +1206,29 @@ func (s *GormStore) BulkUpdateState(ids []uint, state model.TaskState) ([]model.
 		return nil, err
 	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "task.bulk_state_changed",
-		TaskIDs: ids,
+		TaskIDs: affectedIDs,
 	})
 
 	return results, nil
 }
 
-func (s *GormStore) BulkUpdatePriority(ids []uint, priority int) ([]model.Task, error) {
+func (s *GormStore) BulkUpdatePriority(ctx context.Context, ids []uint, priority int) ([]model.Task, error) {
 	if len(ids) > maxBulkIDs {
 		return nil, &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
 	}
 
+	db := s.db.WithContext(ctx)
 	var results []model.Task
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		for _, id := range ids {
 			if err := validateID(id); err != nil {
 				return err
 			}
 			var task model.Task
 			if err := tx.First(&task, id).Error; err != nil {
-				if err == gorm.ErrRecordNotFound {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
 					return fmt.Errorf("task %d: %w", id, model.ErrNotFound)
 				}
 				return err
@@ -1000,11 +1238,18 @@ func (s *GormStore) BulkUpdatePriority(ids []uint, priority int) ([]model.Task, 
 			if err != nil {
 				return err
 			}
-			tx.Model(&task).Update("priority", clamped)
-			if clamped < task.Priority {
-				s.propagatePriorityUp(tx, id, clamped)
+			oldPriority := task.Priority
+			if err := tx.Model(&task).Update("priority", clamped).Error; err != nil {
+				return err
 			}
-			tx.First(&task, id)
+			if clamped < oldPriority {
+				if err := s.propagatePriorityUp(tx, id, clamped); err != nil {
+					return err
+				}
+			}
+			if err := tx.First(&task, id).Error; err != nil {
+				return err
+			}
 			results = append(results, task)
 		}
 		return nil
@@ -1013,7 +1258,7 @@ func (s *GormStore) BulkUpdatePriority(ids []uint, priority int) ([]model.Task, 
 		return nil, err
 	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "task.bulk_priority_changed",
 		TaskIDs: ids,
 	})
@@ -1021,7 +1266,7 @@ func (s *GormStore) BulkUpdatePriority(ids []uint, priority int) ([]model.Task, 
 	return results, nil
 }
 
-func (s *GormStore) BulkAddTags(ids []uint, tags []string) error {
+func (s *GormStore) BulkAddTags(ctx context.Context, ids []uint, tags []string) error {
 	if len(ids) > maxBulkIDs {
 		return &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
 	}
@@ -1029,7 +1274,53 @@ func (s *GormStore) BulkAddTags(ids []uint, tags []string) error {
 		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	db := s.db.WithContext(ctx)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		for _, id := range ids {
+			if err := validateID(id); err != nil {
+				return err
+			}
+			if _, err := s.taskExists(tx, id); err != nil {
+				return err
+			}
+
+			// Check tag count limit
+			var existing int64
+			if err := tx.Model(&model.TaskTag{}).Where("task_id = ?", id).Count(&existing).Error; err != nil {
+				return err
+			}
+			if int(existing)+len(tags) > 50 {
+				return &model.ValidationError{Field: "tags", Message: fmt.Sprintf("task %d: max 50 tags per task", id)}
+			}
+
+			for _, tag := range tags {
+				tt := model.TaskTag{TaskID: id, Tag: tag}
+				if err := tx.Where(tt).FirstOrCreate(&tt).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	s.emit(ctx, store.StoreEvent{
+		Type:    "task.tags_changed",
+		TaskIDs: ids,
+	})
+
+	return nil
+}
+
+func (s *GormStore) BulkRemoveTags(ctx context.Context, ids []uint, tags []string) error {
+	if len(ids) > maxBulkIDs {
+		return &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
+	}
+
+	db := s.db.WithContext(ctx)
+	err := db.Transaction(func(tx *gorm.DB) error {
 		for _, id := range ids {
 			if err := validateID(id); err != nil {
 				return err
@@ -1038,35 +1329,28 @@ func (s *GormStore) BulkAddTags(ids []uint, tags []string) error {
 				return err
 			}
 			for _, tag := range tags {
-				tt := model.TaskTag{TaskID: id, Tag: tag}
-				tx.Where(tt).FirstOrCreate(&tt)
+				if err := tx.Where("task_id = ? AND tag = ?", id, tag).Delete(&model.TaskTag{}).Error; err != nil {
+					return err
+				}
 			}
 		}
 		return nil
 	})
-}
-
-func (s *GormStore) BulkRemoveTags(ids []uint, tags []string) error {
-	if len(ids) > maxBulkIDs {
-		return &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
+	if err != nil {
+		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, id := range ids {
-			if err := validateID(id); err != nil {
-				return err
-			}
-			for _, tag := range tags {
-				tx.Where("task_id = ? AND tag = ?", id, tag).Delete(&model.TaskTag{})
-			}
-		}
-		return nil
+	s.emit(ctx, store.StoreEvent{
+		Type:    "task.tags_changed",
+		TaskIDs: ids,
 	})
+
+	return nil
 }
 
 // --- Tags ---
 
-func (s *GormStore) AddTags(taskID uint, tags []string) error {
+func (s *GormStore) AddTags(ctx context.Context, taskID uint, tags []string) error {
 	if err := validateID(taskID); err != nil {
 		return err
 	}
@@ -1074,42 +1358,73 @@ func (s *GormStore) AddTags(taskID uint, tags []string) error {
 		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.taskExists(tx, taskID); err != nil {
+	db := s.db.WithContext(ctx)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.taskExistsActive(tx, taskID); err != nil {
 			return err
 		}
 
 		// Check tag count
 		var existing int64
-		tx.Model(&model.TaskTag{}).Where("task_id = ?", taskID).Count(&existing)
+		if err := tx.Model(&model.TaskTag{}).Where("task_id = ?", taskID).Count(&existing).Error; err != nil {
+			return err
+		}
 		if int(existing)+len(tags) > 50 {
 			return &model.ValidationError{Field: "tags", Message: "max 50 tags per task"}
 		}
 
 		for _, tag := range tags {
 			tt := model.TaskTag{TaskID: taskID, Tag: tag}
-			tx.Where(tt).FirstOrCreate(&tt)
+			if err := tx.Where(tt).FirstOrCreate(&tt).Error; err != nil {
+				return err
+			}
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	s.emit(ctx, store.StoreEvent{
+		Type:    "task.tags_changed",
+		TaskIDs: []uint{taskID},
+	})
+
+	return nil
 }
 
-func (s *GormStore) RemoveTags(taskID uint, tags []string) error {
+func (s *GormStore) RemoveTags(ctx context.Context, taskID uint, tags []string) error {
 	if err := validateID(taskID); err != nil {
 		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	db := s.db.WithContext(ctx)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.taskExistsActive(tx, taskID); err != nil {
+			return err
+		}
 		for _, tag := range tags {
-			tx.Where("task_id = ? AND tag = ?", taskID, tag).Delete(&model.TaskTag{})
+			if err := tx.Where("task_id = ? AND tag = ?", taskID, tag).Delete(&model.TaskTag{}).Error; err != nil {
+				return err
+			}
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	s.emit(ctx, store.StoreEvent{
+		Type:    "task.tags_changed",
+		TaskIDs: []uint{taskID},
+	})
+
+	return nil
 }
 
 // --- Links ---
 
-func (s *GormStore) AddLink(taskID uint, linkType model.LinkType, url string) (*model.Link, error) {
+func (s *GormStore) AddLink(ctx context.Context, taskID uint, linkType model.LinkType, url string) (*model.Link, error) {
 	if err := validateID(taskID); err != nil {
 		return nil, err
 	}
@@ -1120,9 +1435,10 @@ func (s *GormStore) AddLink(taskID uint, linkType model.LinkType, url string) (*
 		return nil, err
 	}
 
+	db := s.db.WithContext(ctx)
 	link := model.Link{TaskID: taskID, Type: linkType, URL: url}
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.taskExists(tx, taskID); err != nil {
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.taskExistsActive(tx, taskID); err != nil {
 			return err
 		}
 		return tx.Create(&link).Error
@@ -1130,19 +1446,26 @@ func (s *GormStore) AddLink(taskID uint, linkType model.LinkType, url string) (*
 	if err != nil {
 		return nil, err
 	}
+
+	s.emit(ctx, store.StoreEvent{
+		Type:    "link.created",
+		TaskIDs: []uint{taskID},
+	})
+
 	return &link, nil
 }
 
-func (s *GormStore) ListLinks(taskID uint) ([]model.Link, error) {
+func (s *GormStore) ListLinks(ctx context.Context, taskID uint) ([]model.Link, error) {
 	if err := validateID(taskID); err != nil {
 		return nil, err
 	}
+	db := s.db.WithContext(ctx)
 	var links []model.Link
-	err := s.db.Where("task_id = ?", taskID).Find(&links).Error
+	err := db.Where("task_id = ?", taskID).Find(&links).Error
 	return links, err
 }
 
-func (s *GormStore) DeleteLink(taskID uint, linkID uint) error {
+func (s *GormStore) DeleteLink(ctx context.Context, taskID uint, linkID uint) error {
 	if err := validateID(taskID); err != nil {
 		return err
 	}
@@ -1150,16 +1473,26 @@ func (s *GormStore) DeleteLink(taskID uint, linkID uint) error {
 		return err
 	}
 
-	result := s.db.Where("id = ? AND task_id = ?", linkID, taskID).Delete(&model.Link{})
+	db := s.db.WithContext(ctx)
+	result := db.Where("id = ? AND task_id = ?", linkID, taskID).Delete(&model.Link{})
+	if result.Error != nil {
+		return result.Error
+	}
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("link %d for task %d: %w", linkID, taskID, model.ErrNotFound)
 	}
-	return result.Error
+
+	s.emit(ctx, store.StoreEvent{
+		Type:    "link.deleted",
+		TaskIDs: []uint{taskID},
+	})
+
+	return nil
 }
 
 // --- Notes ---
 
-func (s *GormStore) AddNote(taskID uint, text string) (*model.Note, error) {
+func (s *GormStore) AddNote(ctx context.Context, taskID uint, text string) (*model.Note, error) {
 	if err := validateID(taskID); err != nil {
 		return nil, err
 	}
@@ -1167,9 +1500,10 @@ func (s *GormStore) AddNote(taskID uint, text string) (*model.Note, error) {
 		return nil, err
 	}
 
+	db := s.db.WithContext(ctx)
 	note := model.Note{TaskID: taskID, Text: text}
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.taskExists(tx, taskID); err != nil {
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.taskExistsActive(tx, taskID); err != nil {
 			return err
 		}
 		return tx.Create(&note).Error
@@ -1178,7 +1512,7 @@ func (s *GormStore) AddNote(taskID uint, text string) (*model.Note, error) {
 		return nil, err
 	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "note.created",
 		TaskIDs: []uint{taskID},
 		NoteIDs: []uint{note.ID},
@@ -1187,7 +1521,7 @@ func (s *GormStore) AddNote(taskID uint, text string) (*model.Note, error) {
 	return &note, nil
 }
 
-func (s *GormStore) UpdateNote(taskID uint, noteID uint, text string) (*model.Note, error) {
+func (s *GormStore) UpdateNote(ctx context.Context, taskID uint, noteID uint, text string) (*model.Note, error) {
 	if err := validateID(taskID); err != nil {
 		return nil, err
 	}
@@ -1198,10 +1532,14 @@ func (s *GormStore) UpdateNote(taskID uint, noteID uint, text string) (*model.No
 		return nil, err
 	}
 
+	db := s.db.WithContext(ctx)
 	var note model.Note
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.taskExistsActive(tx, taskID); err != nil {
+			return err
+		}
 		if err := tx.Where("id = ? AND task_id = ?", noteID, taskID).First(&note).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("note %d for task %d: %w", noteID, taskID, model.ErrNotFound)
 			}
 			return err
@@ -1212,7 +1550,7 @@ func (s *GormStore) UpdateNote(taskID uint, noteID uint, text string) (*model.No
 		return nil, err
 	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "note.updated",
 		TaskIDs: []uint{taskID},
 		NoteIDs: []uint{noteID},
@@ -1221,16 +1559,17 @@ func (s *GormStore) UpdateNote(taskID uint, noteID uint, text string) (*model.No
 	return &note, nil
 }
 
-func (s *GormStore) ListNotes(taskID uint) ([]model.Note, error) {
+func (s *GormStore) ListNotes(ctx context.Context, taskID uint) ([]model.Note, error) {
 	if err := validateID(taskID); err != nil {
 		return nil, err
 	}
+	db := s.db.WithContext(ctx)
 	var notes []model.Note
-	err := s.db.Where("task_id = ?", taskID).Order("created_at ASC").Find(&notes).Error
+	err := db.Where("task_id = ?", taskID).Order("created_at ASC").Find(&notes).Error
 	return notes, err
 }
 
-func (s *GormStore) DeleteNote(taskID uint, noteID uint) error {
+func (s *GormStore) DeleteNote(ctx context.Context, taskID uint, noteID uint) error {
 	if err := validateID(taskID); err != nil {
 		return err
 	}
@@ -1238,18 +1577,22 @@ func (s *GormStore) DeleteNote(taskID uint, noteID uint) error {
 		return err
 	}
 
-	result := s.db.Where("id = ? AND task_id = ?", noteID, taskID).Delete(&model.Note{})
+	db := s.db.WithContext(ctx)
+	result := db.Where("id = ? AND task_id = ?", noteID, taskID).Delete(&model.Note{})
+	if result.Error != nil {
+		return result.Error
+	}
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("note %d for task %d: %w", noteID, taskID, model.ErrNotFound)
 	}
 
-	s.emit(store.StoreEvent{
+	s.emit(ctx, store.StoreEvent{
 		Type:    "note.deleted",
 		TaskIDs: []uint{taskID},
 		NoteIDs: []uint{noteID},
 	})
 
-	return result.Error
+	return nil
 }
 
 // Compile-time interface check
