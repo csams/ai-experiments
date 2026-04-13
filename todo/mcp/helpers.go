@@ -142,6 +142,25 @@ func requireStrSlice(req mcpgo.CallToolRequest, key string) ([]string, error) {
 	return strs, nil
 }
 
+// getOptBool extracts a *bool argument, returns nil if missing.
+func getOptBool(req mcpgo.CallToolRequest, key string) *bool {
+	args := req.GetArguments()
+	if v, ok := args[key].(bool); ok {
+		return &v
+	}
+	return nil
+}
+
+// getOptInt extracts a *int argument, returns nil if missing.
+func getOptInt(req mcpgo.CallToolRequest, key string) *int {
+	args := req.GetArguments()
+	if v, ok := args[key].(float64); ok {
+		i := int(v)
+		return &i
+	}
+	return nil
+}
+
 // toJSON marshals v to a pretty JSON string.
 func toJSON(v any) string {
 	b, err := json.MarshalIndent(v, "", "  ")

@@ -71,6 +71,19 @@ type ListTasksOptions struct {
 	SortBy          string           // "priority" (default), "due", "created", "updated"
 	Limit           int
 	Offset          int
+
+	// Due date filters
+	HasDueDate *bool      // true = has due date, false = no due date set
+	DueBefore  *time.Time // due_at < X (excludes tasks with no due date)
+	DueAfter   *time.Time // due_at > X (excludes tasks with no due date)
+	DueOn      *time.Time // due_at falls on this calendar day (UTC)
+
+	// Priority filters
+	PriorityMin *int // priority >= X (inclusive)
+	PriorityMax *int // priority <= X (inclusive)
+
+	// Tag subset filter
+	TagsSubsetOf []string // task's tags must all be within this set
 }
 
 // StoreEvent is emitted by the store after successful mutations.

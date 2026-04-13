@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -26,12 +25,10 @@ var taskCreateCmd = &cobra.Command{
 
 		var dueAt *time.Time
 		if dueStr != "" {
-			t, err := time.Parse("2006-01-02", dueStr)
+			dueAt, err = parseDate(dueStr)
 			if err != nil {
-				return fmt.Errorf("invalid date %q (use YYYY-MM-DD): %w", dueStr, err)
+				return err
 			}
-			utc := t.UTC()
-			dueAt = &utc
 		}
 
 		task, err := s.CreateTask(cmd.Context(), title, desc, priority, dueAt, tags)

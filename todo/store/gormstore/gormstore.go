@@ -547,10 +547,38 @@ func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) 
 	if opts.Overdue {
 		q = q.Where("due_at IS NOT NULL AND due_at < ?", time.Now().UTC())
 	}
+	if opts.HasDueDate != nil {
+		if *opts.HasDueDate {
+			q = q.Where("due_at IS NOT NULL")
+		} else {
+			q = q.Where("due_at IS NULL")
+		}
+	}
+	if opts.DueBefore != nil {
+		q = q.Where("due_at IS NOT NULL AND due_at < ?", *opts.DueBefore)
+	}
+	if opts.DueAfter != nil {
+		q = q.Where("due_at IS NOT NULL AND due_at > ?", *opts.DueAfter)
+	}
+	if opts.DueOn != nil {
+		start := time.Date(opts.DueOn.Year(), opts.DueOn.Month(), opts.DueOn.Day(), 0, 0, 0, 0, time.UTC)
+		end := start.AddDate(0, 0, 1)
+		q = q.Where("due_at IS NOT NULL AND due_at >= ? AND due_at < ?", start, end)
+	}
+	if opts.PriorityMin != nil {
+		q = q.Where("priority >= ?", *opts.PriorityMin)
+	}
+	if opts.PriorityMax != nil {
+		q = q.Where("priority <= ?", *opts.PriorityMax)
+	}
 
 	// Tag filter (AND logic)
 	for _, tag := range opts.Tags {
 		q = q.Where("id IN (SELECT task_id FROM task_tags WHERE tag = ?)", tag)
+	}
+	// Tag subset filter: task's tags must all be within the given set
+	if len(opts.TagsSubsetOf) > 0 {
+		q = q.Where("NOT EXISTS (SELECT 1 FROM task_tags WHERE task_tags.task_id = tasks.id AND tag NOT IN ?)", opts.TagsSubsetOf)
 	}
 
 	// Sort

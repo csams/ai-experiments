@@ -90,6 +90,31 @@ Add to your MCP settings:
 
 Semantic search excludes archived items by default. Pass `include_archived: true` (MCP) or `--include-archived` (CLI) to include them.
 
+### `list_tasks` Filtering
+
+`list_tasks` supports the following filters (all optional, combined with AND logic):
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `state` | string | Filter by state: New, Progressing, Blocked, Unblocked, Done |
+| `include_archived` | boolean | Include archived tasks (default: false) |
+| `include_subtasks` | boolean | Include subtasks in flat list (default: false) |
+| `parent_id` | number | Filter to subtree of this task ID |
+| `tags` | array[string] | Task must have ALL specified tags (superset/AND logic) |
+| `tags_subset_of` | array[string] | Task's tags must all be within this set (subset check) |
+| `overdue` | boolean | Only tasks past their due date |
+| `has_due_date` | boolean | true = only with due date, false = only without |
+| `due_before` | string | Due before this date, exclusive (YYYY-MM-DD) |
+| `due_after` | string | Due after this date, exclusive (YYYY-MM-DD) |
+| `due_on` | string | Due on this calendar day (YYYY-MM-DD, UTC) |
+| `priority_min` | number | Priority >= this value (inclusive) |
+| `priority_max` | number | Priority <= this value (inclusive) |
+| `sort_by` | string | Sort: priority (default), due, created, updated |
+
+**Combining tag filters:** Use `tags` + `tags_subset_of` together for exact tag matching (task has at least AND only these tags).
+
+**CLI equivalents:** `--has-due-date`, `--no-due-date`, `--due-before`, `--due-after`, `--due-on`, `--priority-min`, `--priority-max`, `--tag-subset-of`.
+
 ## Task States
 
 `New` -> `Progressing` -> `Done`

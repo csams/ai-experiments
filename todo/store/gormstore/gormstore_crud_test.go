@@ -430,3 +430,257 @@ func TestSearchNotes(t *testing.T) {
 		t.Errorf("results = %d, want 1", len(results))
 	}
 }
+
+func intPtr(i int) *int   { return &i }
+func boolPtr(b bool) *bool { return &b }
+
+func TestListTasks_HasDueDate(t *testing.T) {
+	s := newTestStore(t)
+	due := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	s.CreateTask(ctx(), "With due", "", 0, &due, nil)
+	s.CreateTask(ctx(), "Without due", "", 0, nil, nil)
+
+	// has_due_date = true
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{HasDueDate: boolPtr(true)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Title != "With due" {
+		t.Errorf("has_due_date=true: got %d tasks, want 1 with due date", len(tasks))
+	}
+
+	// has_due_date = false
+	tasks, err = s.ListTasks(ctx(), store.ListTasksOptions{HasDueDate: boolPtr(false)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Title != "Without due" {
+		t.Errorf("has_due_date=false: got %d tasks, want 1 without due date", len(tasks))
+	}
+
+	// has_due_date = nil (no filter)
+	tasks, err = s.ListTasks(ctx(), store.ListTasksOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("has_due_date=nil: got %d tasks, want 2", len(tasks))
+	}
+}
+
+func TestListTasks_DueBefore(t *testing.T) {
+	s := newTestStore(t)
+	jan := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	mar := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	jun := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	s.CreateTask(ctx(), "Jan", "", 0, &jan, nil)
+	s.CreateTask(ctx(), "Mar", "", 0, &mar, nil)
+	s.CreateTask(ctx(), "Jun", "", 0, &jun, nil)
+	s.CreateTask(ctx(), "NoDue", "", 0, nil, nil)
+
+	cutoff := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{DueBefore: &cutoff})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("due_before Apr 1: got %d tasks, want 2 (Jan, Mar)", len(tasks))
+	}
+
+	// Exclusive: exact boundary should not match
+	tasks, err = s.ListTasks(ctx(), store.ListTasksOptions{DueBefore: &mar})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("due_before Mar 15: got %d tasks, want 1 (Jan only)", len(tasks))
+	}
+}
+
+func TestListTasks_DueAfter(t *testing.T) {
+	s := newTestStore(t)
+	jan := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	jun := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	s.CreateTask(ctx(), "Jan", "", 0, &jan, nil)
+	s.CreateTask(ctx(), "Jun", "", 0, &jun, nil)
+	s.CreateTask(ctx(), "NoDue", "", 0, nil, nil)
+
+	cutoff := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{DueAfter: &cutoff})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Title != "Jun" {
+		t.Errorf("due_after Mar 1: got %d tasks, want 1 (Jun)", len(tasks))
+	}
+
+	// Exclusive: exact boundary should not match
+	tasks, err = s.ListTasks(ctx(), store.ListTasksOptions{DueAfter: &jun})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("due_after Jun 15: got %d tasks, want 0", len(tasks))
+	}
+}
+
+func TestListTasks_DueOn(t *testing.T) {
+	s := newTestStore(t)
+	// Two tasks on the same day at different times
+	morning := time.Date(2026, 5, 10, 8, 0, 0, 0, time.UTC)
+	evening := time.Date(2026, 5, 10, 22, 30, 0, 0, time.UTC)
+	dayBefore := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	dayAfter := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	s.CreateTask(ctx(), "Morning", "", 0, &morning, nil)
+	s.CreateTask(ctx(), "Evening", "", 0, &evening, nil)
+	s.CreateTask(ctx(), "DayBefore", "", 0, &dayBefore, nil)
+	s.CreateTask(ctx(), "DayAfter", "", 0, &dayAfter, nil)
+	s.CreateTask(ctx(), "NoDue", "", 0, nil, nil)
+
+	target := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{DueOn: &target})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("due_on May 10: got %d tasks, want 2 (Morning, Evening)", len(tasks))
+	}
+}
+
+func TestListTasks_DueRange(t *testing.T) {
+	s := newTestStore(t)
+	jan := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	mar := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	jun := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	s.CreateTask(ctx(), "Jan", "", 0, &jan, nil)
+	s.CreateTask(ctx(), "Mar", "", 0, &mar, nil)
+	s.CreateTask(ctx(), "Jun", "", 0, &jun, nil)
+	s.CreateTask(ctx(), "NoDue", "", 0, nil, nil)
+
+	// Combined range: after Feb 1 AND before May 1 → only Mar
+	after := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	before := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{DueAfter: &after, DueBefore: &before})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Title != "Mar" {
+		t.Errorf("due range Feb-May: got %d tasks, want 1 (Mar)", len(tasks))
+	}
+}
+
+func TestListTasks_PriorityRange(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateTask(ctx(), "P-1", "", -1, nil, nil)
+	s.CreateTask(ctx(), "P0", "", 0, nil, nil)
+	s.CreateTask(ctx(), "P1", "", 1, nil, nil)
+	s.CreateTask(ctx(), "P5", "", 5, nil, nil)
+
+	// Min only
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{PriorityMin: intPtr(1)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("priority_min=1: got %d tasks, want 2 (P1, P5)", len(tasks))
+	}
+
+	// Max only
+	tasks, err = s.ListTasks(ctx(), store.ListTasksOptions{PriorityMax: intPtr(0)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("priority_max=0: got %d tasks, want 2 (P-1, P0)", len(tasks))
+	}
+
+	// Exact match (min = max)
+	tasks, err = s.ListTasks(ctx(), store.ListTasksOptions{PriorityMin: intPtr(0), PriorityMax: intPtr(0)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Title != "P0" {
+		t.Errorf("priority 0..0: got %d tasks, want 1 (P0)", len(tasks))
+	}
+
+	// Range
+	tasks, err = s.ListTasks(ctx(), store.ListTasksOptions{PriorityMin: intPtr(0), PriorityMax: intPtr(5)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 3 {
+		t.Errorf("priority 0..5: got %d tasks, want 3 (P0, P1, P5)", len(tasks))
+	}
+
+	// Negative boundary: min=-1 should include P-1 itself
+	tasks, err = s.ListTasks(ctx(), store.ListTasksOptions{PriorityMin: intPtr(-1)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 4 {
+		t.Errorf("priority_min=-1: got %d tasks, want 4 (all)", len(tasks))
+	}
+}
+
+func TestListTasks_TagsSubsetOf(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateTask(ctx(), "AB", "", 0, nil, []string{"a", "b"})
+	s.CreateTask(ctx(), "A", "", 0, nil, []string{"a"})
+	s.CreateTask(ctx(), "C", "", 0, nil, []string{"c"})
+	s.CreateTask(ctx(), "Empty", "", 0, nil, nil)
+
+	// subset_of {a, b}: AB({a,b}⊆{a,b}), A({a}⊆{a,b}), Empty(∅⊆{a,b}) match; C does not
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{TagsSubsetOf: []string{"a", "b"}})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 3 {
+		t.Errorf("tags_subset_of {a,b}: got %d tasks, want 3 (AB, A, Empty)", len(tasks))
+	}
+	for _, task := range tasks {
+		if task.Title == "C" {
+			t.Errorf("tags_subset_of {a,b}: should not include task C with tag {c}")
+		}
+	}
+}
+
+func TestListTasks_TagsSubsetOfCombined(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateTask(ctx(), "AB", "", 0, nil, []string{"a", "b"})
+	s.CreateTask(ctx(), "A", "", 0, nil, []string{"a"})
+	s.CreateTask(ctx(), "ABC", "", 0, nil, []string{"a", "b", "c"})
+	s.CreateTask(ctx(), "Empty", "", 0, nil, nil)
+
+	// Exact match: Tags (superset) = {a, b} AND TagsSubsetOf = {a, b}
+	// Should match only AB: has at least {a,b} AND has only tags from {a,b}
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{
+		Tags:         []string{"a", "b"},
+		TagsSubsetOf: []string{"a", "b"},
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Title != "AB" {
+		t.Errorf("exact {a,b}: got %d tasks, want 1 (AB)", len(tasks))
+	}
+}
+
+func TestListTasks_ConflictingFilters(t *testing.T) {
+	s := newTestStore(t)
+	due := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	s.CreateTask(ctx(), "With due", "", 0, &due, nil)
+	s.CreateTask(ctx(), "Without due", "", 0, nil, nil)
+
+	// has_due_date=false AND due_before=X → contradictory, should return 0
+	cutoff := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{
+		HasDueDate: boolPtr(false),
+		DueBefore:  &cutoff,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("conflicting filters: got %d tasks, want 0", len(tasks))
+	}
+}

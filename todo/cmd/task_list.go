@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/csams/todo/model"
 	"github.com/csams/todo/store"
 	"github.com/spf13/cobra"
@@ -22,6 +24,7 @@ var taskListCmd = &cobra.Command{
 		opts.Overdue, _ = cmd.Flags().GetBool("overdue")
 		opts.SortBy, _ = cmd.Flags().GetString("sort")
 		opts.Tags, _ = cmd.Flags().GetStringSlice("tag")
+		opts.TagsSubsetOf, _ = cmd.Flags().GetStringSlice("tag-subset-of")
 
 		if stateStr, _ := cmd.Flags().GetString("state"); stateStr != "" {
 			state, err := normalizeState(stateStr)
@@ -37,6 +40,50 @@ var taskListCmd = &cobra.Command{
 				return err
 			}
 			opts.ParentID = &pid
+		}
+
+		// Due date presence filters
+		hasDue := cmd.Flags().Changed("has-due-date")
+		noDue := cmd.Flags().Changed("no-due-date")
+		if hasDue && noDue {
+			return fmt.Errorf("--has-due-date and --no-due-date are mutually exclusive")
+		}
+		if hasDue {
+			v := true
+			opts.HasDueDate = &v
+		} else if noDue {
+			v := false
+			opts.HasDueDate = &v
+		}
+
+		// Due date range filters
+		if s, _ := cmd.Flags().GetString("due-before"); s != "" {
+			opts.DueBefore, err = parseDate(s)
+			if err != nil {
+				return err
+			}
+		}
+		if s, _ := cmd.Flags().GetString("due-after"); s != "" {
+			opts.DueAfter, err = parseDate(s)
+			if err != nil {
+				return err
+			}
+		}
+		if s, _ := cmd.Flags().GetString("due-on"); s != "" {
+			opts.DueOn, err = parseDate(s)
+			if err != nil {
+				return err
+			}
+		}
+
+		// Priority range filters
+		if cmd.Flags().Changed("priority-min") {
+			v, _ := cmd.Flags().GetInt("priority-min")
+			opts.PriorityMin = &v
+		}
+		if cmd.Flags().Changed("priority-max") {
+			v, _ := cmd.Flags().GetInt("priority-max")
+			opts.PriorityMax = &v
 		}
 
 		tasks, err := s.ListTasks(cmd.Context(), opts)
@@ -63,5 +110,13 @@ func init() {
 	taskListCmd.Flags().String("parent", "", "filter to subtree of task ID")
 	taskListCmd.Flags().String("sort", "priority", "sort by: priority, due, created, updated")
 	taskListCmd.Flags().StringSlice("tag", nil, "filter by tag (AND logic, repeatable)")
+	taskListCmd.Flags().Bool("has-due-date", false, "only tasks with a due date")
+	taskListCmd.Flags().Bool("no-due-date", false, "only tasks without a due date")
+	taskListCmd.Flags().String("due-before", "", "tasks due before this date (YYYY-MM-DD, exclusive)")
+	taskListCmd.Flags().String("due-after", "", "tasks due after this date (YYYY-MM-DD, exclusive)")
+	taskListCmd.Flags().String("due-on", "", "tasks due on this date (YYYY-MM-DD)")
+	taskListCmd.Flags().Int("priority-min", 0, "minimum priority value (inclusive)")
+	taskListCmd.Flags().Int("priority-max", 0, "maximum priority value (inclusive)")
+	taskListCmd.Flags().StringSlice("tag-subset-of", nil, "task tags must be within this set (repeatable)")
 	taskCmd.AddCommand(taskListCmd)
 }

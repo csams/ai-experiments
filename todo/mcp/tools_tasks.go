@@ -85,7 +85,10 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// list_tasks
 	srv.AddTool(mcpgo.NewTool("list_tasks",
-		mcpgo.WithDescription("List tasks with filters and sorting. By default shows only non-archived top-level tasks sorted by priority."),
+		mcpgo.WithDescription("List tasks with filters and sorting. By default shows only "+
+			"non-archived top-level tasks sorted by priority. Supports filtering by state, "+
+			"due date (range, exact day, or presence), priority range, and tags (superset "+
+			"AND logic or subset containment)."),
 		mcpgo.WithString("state", mcpgo.Description("Filter by state"), mcpgo.Enum("New", "Progressing", "Blocked", "Unblocked", "Done")),
 		mcpgo.WithBoolean("include_archived", mcpgo.Description("Include archived tasks")),
 		mcpgo.WithBoolean("include_subtasks", mcpgo.Description("Include subtasks (flat list)")),
@@ -93,6 +96,27 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		mcpgo.WithArray("tags", mcpgo.Description("Filter by tags (AND logic)"), mcpgo.WithStringItems()),
 		mcpgo.WithBoolean("overdue", mcpgo.Description("Only tasks past their due date")),
 		mcpgo.WithString("sort_by", mcpgo.Description("Sort field (default: priority)"), mcpgo.Enum("priority", "due", "created", "updated")),
+		mcpgo.WithBoolean("has_due_date",
+			mcpgo.Description("Filter by due date presence: true = only tasks with a due date, false = only tasks without")),
+		mcpgo.WithString("due_before",
+			mcpgo.Description("Only tasks due before this date, exclusive (YYYY-MM-DD). Excludes tasks with no due date."),
+			mcpgo.Pattern(`^\d{4}-\d{2}-\d{2}$`)),
+		mcpgo.WithString("due_after",
+			mcpgo.Description("Only tasks due after this date, exclusive (YYYY-MM-DD). Excludes tasks with no due date."),
+			mcpgo.Pattern(`^\d{4}-\d{2}-\d{2}$`)),
+		mcpgo.WithString("due_on",
+			mcpgo.Description("Only tasks due on this calendar day (YYYY-MM-DD, UTC). Excludes tasks with no due date."),
+			mcpgo.Pattern(`^\d{4}-\d{2}-\d{2}$`)),
+		mcpgo.WithNumber("priority_min",
+			mcpgo.Description("Minimum priority value, inclusive (lower number = higher importance). Negative values allowed.")),
+		mcpgo.WithNumber("priority_max",
+			mcpgo.Description("Maximum priority value, inclusive (lower number = higher importance). Negative values allowed.")),
+		mcpgo.WithArray("tags_subset_of",
+			mcpgo.Description("Task's tags must all be within this set (subset check). "+
+				"A task with no tags matches (empty set is a subset of any set). "+
+				"Combine with 'tags' to require exact tag sets."),
+			mcpgo.WithStringItems(mcpgo.MaxLength(100)),
+			mcpgo.MaxItems(50)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		opts := store.ListTasksOptions{
 			IncludeArchived: getBool(req, "include_archived"),
@@ -100,6 +124,10 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 			Tags:            getStrSlice(req, "tags"),
 			Overdue:         getBool(req, "overdue"),
 			SortBy:          getStr(req, "sort_by"),
+			HasDueDate:      getOptBool(req, "has_due_date"),
+			PriorityMin:     getOptInt(req, "priority_min"),
+			PriorityMax:     getOptInt(req, "priority_max"),
+			TagsSubsetOf:    getStrSlice(req, "tags_subset_of"),
 		}
 		if stateStr := getStr(req, "state"); stateStr != "" {
 			state := model.TaskState(stateStr)
@@ -110,6 +138,16 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		}
 		if pid := getUint(req, "parent_id"); pid > 0 {
 			opts.ParentID = &pid
+		}
+		var err error
+		if opts.DueBefore, err = getTime(req, "due_before"); err != nil {
+			return errResult(err), nil
+		}
+		if opts.DueAfter, err = getTime(req, "due_after"); err != nil {
+			return errResult(err), nil
+		}
+		if opts.DueOn, err = getTime(req, "due_on"); err != nil {
+			return errResult(err), nil
 		}
 
 		tasks, err := s.ListTasks(ctx, opts)

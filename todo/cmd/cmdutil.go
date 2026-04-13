@@ -207,6 +207,16 @@ func truncate(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
+// parseDate parses a YYYY-MM-DD date string into a UTC time.Time.
+func parseDate(s string) (*time.Time, error) {
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid date %q (use YYYY-MM-DD): %w", s, err)
+	}
+	utc := t.UTC()
+	return &utc, nil
+}
+
 // normalizeState converts a case-insensitive state string to the canonical TaskState.
 func normalizeState(s string) (model.TaskState, error) {
 	for state := range model.ValidTaskStates {

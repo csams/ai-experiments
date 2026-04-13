@@ -1,9 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-	"time"
-
 	"github.com/csams/todo/store"
 	"github.com/spf13/cobra"
 )
@@ -42,12 +39,10 @@ var taskUpdateCmd = &cobra.Command{
 			opts.ClearDueAt = true
 		} else if cmd.Flags().Changed("due") {
 			dueStr, _ := cmd.Flags().GetString("due")
-			t, err := time.Parse("2006-01-02", dueStr)
+			opts.DueAt, err = parseDate(dueStr)
 			if err != nil {
-				return fmt.Errorf("invalid date %q (use YYYY-MM-DD): %w", dueStr, err)
+				return err
 			}
-			utc := t.UTC()
-			opts.DueAt = &utc
 		}
 
 		task, err := s.UpdateTask(cmd.Context(), id, opts)
