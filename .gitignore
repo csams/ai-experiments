@@ -31,6 +31,12 @@ go.work.sum
 secrets/*
 !secrets/.gitkeep
 
+# Claude Code
+.claude/
+
+# Application binaries
+todo/todo
+
 # Editor/IDE
 # .idea/
 # .vscode/

@@ -151,6 +151,9 @@ The deployment uses a local CA to issue TLS serving certificates for PostgreSQL 
 ```bash
 make certs          # Generate CA + serving certs (idempotent, skips existing)
 make certs-renew    # Regenerate serving certs (preserves CA)
+
+# Add environment-specific SANs to the MCP cert (e.g., Tailscale, LAN IP):
+MCP_EXTRA_SANS="DNS:myhost.example.ts.net,IP:192.168.1.100" make certs
 ```
 
 Certs are stored in `~/.config/todo/certs/`:
