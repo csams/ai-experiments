@@ -3,13 +3,17 @@ Description=PostgreSQL for Todo task tracker
 After=todo-db-network.service
 
 [Container]
-Image=docker.io/library/postgres:16.13
+Image=docker.io/pgvector/pgvector:pg16
 ContainerName=todo-postgres
 Network=todo-db.network
 Environment=POSTGRES_DB=todo
 Environment=POSTGRES_USER=todo
 Secret=todo-pg-password,type=env,target=POSTGRES_PASSWORD
 Volume=todo-pgdata.volume:/var/lib/postgresql/data
+Volume=%h/.config/todo/certs/postgres:/etc/ssl/todo:ro,Z
+Volume=%h/.config/todo/scripts/pg-start-ssl.sh:/usr/local/bin/pg-start-ssl.sh:ro,Z
+Entrypoint=/usr/local/bin/pg-start-ssl.sh
+Exec=postgres
 PublishPort=127.0.0.1:5432:5432
 HealthCmd=pg_isready -U todo -d todo
 HealthInterval=10s

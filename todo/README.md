@@ -14,7 +14,7 @@ A task tracking system designed for both CLI use and AI agent access via MCP (Mo
 - **Archive**: soft-delete with subtree cascade
 - **Bulk operations**: state, priority, and tag changes across multiple tasks
 - **Full-text search**: tasks and notes
-- **Semantic search** (optional): vector similarity via Ollama/OpenAI + ChromaDB
+- **Semantic search** (optional): vector similarity via Ollama/OpenAI + pgvector (PostgreSQL)
 - **MCP server**: 28 tools for AI agent access (26 core + 2 semantic search; stdio + HTTP transports)
 - **Structured audit logging**: all mutations logged with before/after state
 - **YAML configuration**: with env var overrides
@@ -142,20 +142,14 @@ db:
     sslmode: disable
 
 vector:
-  enabled: false                          # opt-in
+  enabled: false                          # opt-in; requires PostgreSQL with pgvector
   embedder: ollama                        # ollama or openai
-  store: chromadb
+  store: pgvector
   ollama:
     model: nomic-embed-text
     url: http://localhost:11434
   openai:
     model: text-embedding-3-small         # requires OPENAI_API_KEY env
-  chromadb:
-    url: http://localhost:8000
-    collection: todo
-    tenant: default_tenant
-    database: default_database
-    auth_token: ""                          # optional; set via TODO_VECTOR_CHROMADB_AUTH_TOKEN
 
 logging:
   level: info                             # debug, info, warn, error
@@ -179,14 +173,13 @@ TODO_DB_DRIVER=postgres TODO_DB_POSTGRES_HOST=db.example.com ./todo task list
 
 ## Semantic Search (Optional)
 
-Requires [Ollama](https://ollama.ai) and [ChromaDB](https://www.trychroma.com/) running locally.
+Requires [Ollama](https://ollama.ai) and PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension (use the `pgvector/pgvector:pg16` container image).
 
 ```bash
 # Start dependencies
 ollama pull nomic-embed-text
-docker run -d -p 8000:8000 ghcr.io/chroma-core/chroma:latest
 
-# Enable in config or via env
+# Enable in config or via env (requires db.driver=postgres)
 TODO_VECTOR_ENABLED=true ./todo task list
 
 # Build/rebuild vector index
@@ -207,11 +200,10 @@ TODO_VECTOR_ENABLED=true ./todo task list
 # Create .env with secrets
 cat > .env <<EOF
 PG_PASSWORD=changeme
-CHROMA_TOKEN=changeme
 MCP_API_KEY=changeme
 EOF
 
-# Start all services (postgres, chromadb, todo-mcp)
+# Start all services (postgres, todo-mcp)
 podman compose up -d
 
 # MCP HTTP server available at http://localhost:8080
@@ -224,23 +216,10 @@ For production deployment on systemd hosts:
 ```bash
 # Create podman secrets
 echo -n 'changeme' | podman secret create todo-pg-password -
-echo -n 'changeme' | podman secret create todo-chroma-token -
 echo -n 'changeme' | podman secret create todo-mcp-api-key -
 
-# Copy config
-mkdir -p ~/.config/todo
-cp deploy/production.yaml ~/.config/todo/production.yaml
-
-# (Optional) Add TLS certs
-mkdir -p ~/.config/todo/certs
-cp cert.pem key.pem ~/.config/todo/certs/
-# Then set tls_cert/tls_key paths in ~/.config/todo/production.yaml
-
-# Build container image
-podman build -t localhost/todo:latest .
-
-# Install quadlet files (rootless)
-cp deploy/*.container deploy/*.network deploy/*.volume ~/.config/containers/systemd/
+# Deploy (builds image, generates TLS certs, copies quadlet files, starts services)
+make deploy
 
 # Start
 systemctl --user daemon-reload
@@ -276,7 +255,7 @@ store/              Store interface (27 methods)
 store/gormstore/    GORM implementation (SQLite + PostgreSQL)
 store/synced/       VectorSyncer (StoreObserver + SemanticSearcher)
 embed/              Embedder interface + Ollama/OpenAI implementations
-vectorstore/        VectorStore interface + ChromaDB implementation
+vectorstore/        VectorStore interface + pgvector implementation
 audit/              Structured audit logger (StoreObserver)
 cmd/                Cobra CLI (20 command files)
 mcp/                MCP server (8 files, 28 tools)

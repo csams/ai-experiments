@@ -1,12 +1,16 @@
 services:
   postgres:
-    image: docker.io/library/postgres:16.13
+    image: docker.io/pgvector/pgvector:pg16
+    entrypoint: ["/usr/local/bin/pg-start-ssl.sh"]
+    command: ["postgres"]
     environment:
       POSTGRES_DB: todo
       POSTGRES_USER: todo
       POSTGRES_PASSWORD: ${PG_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ${CERT_DIR:?Set CERT_DIR in .env}/postgres:/etc/ssl/todo:ro
+      - ./scripts/pg-start-ssl.sh:/usr/local/bin/pg-start-ssl.sh:ro
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
@@ -15,48 +19,33 @@ services:
       timeout: 5s
       retries: 5
 
-  chromadb:
-    image: ghcr.io/chroma-core/chroma:1.5.7
-    environment:
-      CHROMA_SERVER_AUTHN_PROVIDER: chromadb.auth.token_authn.TokenAuthenticationServerProvider
-      CHROMA_SERVER_AUTHN_CREDENTIALS: ${CHROMA_TOKEN}
-    volumes:
-      - chromadata:/chroma/chroma
-    ports:
-      - "127.0.0.1:8000:8000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "-H", "Authorization: Bearer ${CHROMA_SERVER_AUTHN_CREDENTIALS}", "http://localhost:8000/api/v2/heartbeat"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   todo-mcp:
     build:
       context: .
       dockerfile: Containerfile
+    user: "0"  # Root required to read TLS key files (mounted root:root 0600 from host)
     command: ["mcp", "--config", "/etc/todo/config.yaml", "--transport", "http", "--addr", ":8080"]
     environment:
       - TODO_DB_POSTGRES_HOST=postgres
       - TODO_DB_POSTGRES_PASSWORD=${PG_PASSWORD}
-      - TODO_VECTOR_CHROMADB_URL=http://chromadb:8000
-      - TODO_VECTOR_CHROMADB_AUTH_TOKEN=${CHROMA_TOKEN}
       - TODO_MCP_API_KEY=${MCP_API_KEY:-}
-      - TODO_MCP_TLS_CERT=${MCP_TLS_CERT:-}
-      - TODO_MCP_TLS_KEY=${MCP_TLS_KEY:-}
     configs:
       - source: todo_config
         target: /etc/todo/config.yaml
+    volumes:
+      - ${CERT_DIR:?Set CERT_DIR in .env}/ca.crt:/etc/todo/certs/ca.crt:ro
+      - ${CERT_DIR:?Set CERT_DIR in .env}/mcp:/etc/todo/certs/mcp:ro
     ports:
       - "8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
     depends_on:
       postgres:
-        condition: service_healthy
-      chromadb:
         condition: service_healthy
 
 volumes:
   pgdata:
-  chromadata:
 
 configs:
   todo_config:

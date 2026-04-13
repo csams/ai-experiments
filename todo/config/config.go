@@ -21,21 +21,36 @@ type DBConfig struct {
 }
 
 type PostgresConfig struct {
-	Host     string `yaml:"host" mapstructure:"host"`
-	Port     int    `yaml:"port" mapstructure:"port"`
-	DBName   string `yaml:"dbname" mapstructure:"dbname"`
-	User     string `yaml:"user" mapstructure:"user"`
-	Password string `yaml:"password" mapstructure:"password" json:"-"`
-	SSLMode  string `yaml:"sslmode" mapstructure:"sslmode"`
+	Host        string `yaml:"host" mapstructure:"host"`
+	Port        int    `yaml:"port" mapstructure:"port"`
+	DBName      string `yaml:"dbname" mapstructure:"dbname"`
+	User        string `yaml:"user" mapstructure:"user"`
+	Password    string `yaml:"password" mapstructure:"password" json:"-"`
+	SSLMode     string `yaml:"sslmode" mapstructure:"sslmode"`
+	SSLRootCert string `yaml:"sslrootcert" mapstructure:"sslrootcert"`
+	SSLCert     string `yaml:"sslcert" mapstructure:"sslcert"`
+	SSLKey      string `yaml:"sslkey" mapstructure:"sslkey"`
 }
 
 // PostgresDSN builds a connection string from the Postgres config fields.
 // WARNING: The returned string contains the plaintext password. Do not log it.
 func (p PostgresConfig) PostgresDSN() string {
-	return fmt.Sprintf(
+	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password='%s' dbname=%s sslmode=%s",
 		p.Host, p.Port, p.User, quoteLibpq(p.Password), p.DBName, p.SSLMode,
 	)
+	if p.SSLMode != "" && p.SSLMode != "disable" {
+		if p.SSLRootCert != "" {
+			dsn += fmt.Sprintf(" sslrootcert='%s'", quoteLibpq(p.SSLRootCert))
+		}
+		if p.SSLCert != "" {
+			dsn += fmt.Sprintf(" sslcert='%s'", quoteLibpq(p.SSLCert))
+		}
+		if p.SSLKey != "" {
+			dsn += fmt.Sprintf(" sslkey='%s'", quoteLibpq(p.SSLKey))
+		}
+	}
+	return dsn
 }
 
 // quoteLibpq escapes a value for use inside single quotes in a libpq connection string.
@@ -51,19 +66,31 @@ func (p PostgresConfig) String() string {
 	if p.Password == "" {
 		masked = ""
 	}
-	return fmt.Sprintf(
+	s := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		p.Host, p.Port, p.User, masked, p.DBName, p.SSLMode,
 	)
+	if p.SSLMode != "" && p.SSLMode != "disable" {
+		if p.SSLRootCert != "" {
+			s += fmt.Sprintf(" sslrootcert=%s", p.SSLRootCert)
+		}
+		if p.SSLCert != "" {
+			s += fmt.Sprintf(" sslcert=%s", p.SSLCert)
+		}
+		if p.SSLKey != "" {
+			s += fmt.Sprintf(" sslkey=%s", p.SSLKey)
+		}
+	}
+	return s
 }
 
 type VectorConfig struct {
-	Enabled  bool         `yaml:"enabled" mapstructure:"enabled"`
-	Embedder string       `yaml:"embedder" mapstructure:"embedder"`
-	Store    string       `yaml:"store" mapstructure:"store"`
-	Ollama   OllamaConfig `yaml:"ollama" mapstructure:"ollama"`
-	OpenAI   OpenAIConfig `yaml:"openai" mapstructure:"openai"`
-	ChromaDB ChromaConfig `yaml:"chromadb" mapstructure:"chromadb"`
+	Enabled  bool           `yaml:"enabled" mapstructure:"enabled"`
+	Embedder string         `yaml:"embedder" mapstructure:"embedder"`
+	Store    string         `yaml:"store" mapstructure:"store"`
+	Ollama   OllamaConfig   `yaml:"ollama" mapstructure:"ollama"`
+	OpenAI   OpenAIConfig   `yaml:"openai" mapstructure:"openai"`
+	PgVector PgVectorConfig `yaml:"pgvector" mapstructure:"pgvector"`
 }
 
 type OllamaConfig struct {
@@ -75,12 +102,8 @@ type OpenAIConfig struct {
 	Model string `yaml:"model" mapstructure:"model"`
 }
 
-type ChromaConfig struct {
-	URL        string `yaml:"url" mapstructure:"url"`
-	Collection string `yaml:"collection" mapstructure:"collection"`
-	Tenant     string `yaml:"tenant" mapstructure:"tenant"`
-	Database   string `yaml:"database" mapstructure:"database"`
-	AuthToken  string `yaml:"auth_token" mapstructure:"auth_token" json:"-"`
+type PgVectorConfig struct {
+	// Reserved for future pgvector-specific tuning (e.g., index type, HNSW params).
 }
 
 type LogConfig struct {
@@ -114,14 +137,10 @@ func Load(configPath string) (*Config, error) {
 
 	v.SetDefault("vector.enabled", false)
 	v.SetDefault("vector.embedder", "ollama")
-	v.SetDefault("vector.store", "chromadb")
+	v.SetDefault("vector.store", "pgvector")
 	v.SetDefault("vector.ollama.model", "nomic-embed-text")
 	v.SetDefault("vector.ollama.url", "http://localhost:11434")
 	v.SetDefault("vector.openai.model", "text-embedding-3-small")
-	v.SetDefault("vector.chromadb.url", "http://localhost:8000")
-	v.SetDefault("vector.chromadb.collection", "todo")
-	v.SetDefault("vector.chromadb.tenant", "default_tenant")
-	v.SetDefault("vector.chromadb.database", "default_database")
 
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")

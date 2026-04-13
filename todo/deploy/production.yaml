@@ -6,21 +6,16 @@ db:
     dbname: todo
     user: todo
     password: ""  # set via TODO_DB_POSTGRES_PASSWORD env var or mounted secret
-    sslmode: disable  # TLS not needed when Postgres is on a local container network
+    sslmode: verify-ca
+    sslrootcert: /etc/todo/certs/ca.crt
 
 vector:
   enabled: true
   embedder: ollama
-  store: chromadb
+  store: pgvector
   ollama:
     model: nomic-embed-text
     url: http://host.containers.internal:11434  # host.containers.internal resolves to the host from within podman containers
-  chromadb:
-    url: http://todo-chromadb:8000
-    collection: todo
-    tenant: default_tenant
-    database: default_database
-    auth_token: ""  # injected via TODO_VECTOR_CHROMADB_AUTH_TOKEN env var; do NOT put tokens here
 
 logging:
   level: info
@@ -32,5 +27,5 @@ mcp:
   transport: http
   addr: ":8080"
   api_key: ""    # injected via TODO_MCP_API_KEY env var; do NOT put keys here
-  tls_cert: ""   # e.g. /etc/todo/certs/cert.pem
-  tls_key: ""    # e.g. /etc/todo/certs/key.pem
+  tls_cert: /etc/todo/certs/mcp/server.crt
+  tls_key: /etc/todo/certs/mcp/server.key

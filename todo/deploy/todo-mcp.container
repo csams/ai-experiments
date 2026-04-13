@@ -1,21 +1,21 @@
 [Unit]
 Description=Todo MCP server
-After=postgres.service chromadb.service
-Requires=postgres.service chromadb.service
+After=postgres.service
+Requires=postgres.service
 
 [Container]
 Image=localhost/todo:latest
 ContainerName=todo-mcp
 Network=todo-db.network
-Network=todo-vector.network
+UserNS=keep-id:uid=65534,gid=65534
 Exec=mcp --config /etc/todo/config.yaml --transport http --addr :8080
 ReadOnly=true
 Tmpfs=/tmp
 Volume=%h/.config/todo/production.yaml:/etc/todo/config.yaml:ro,Z
 Secret=todo-pg-password,type=env,target=TODO_DB_POSTGRES_PASSWORD
-Secret=todo-chroma-token,type=env,target=TODO_VECTOR_CHROMADB_AUTH_TOKEN
 Secret=todo-mcp-api-key,type=env,target=TODO_MCP_API_KEY
-Volume=%h/.config/todo/certs:/etc/todo/certs:ro,Z
+Volume=%h/.config/todo/certs/ca.crt:/etc/todo/certs/ca.crt:ro,Z
+Volume=%h/.config/todo/certs/mcp:/etc/todo/certs/mcp:ro,Z
 PublishPort=8082:8080
 
 [Service]

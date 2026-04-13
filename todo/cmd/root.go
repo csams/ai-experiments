@@ -17,7 +17,8 @@ import (
 	"github.com/csams/todo/store"
 	"github.com/csams/todo/store/gormstore"
 	"github.com/csams/todo/store/synced"
-	"github.com/csams/todo/vectorstore/chromadb"
+	"github.com/csams/todo/vectorstore"
+	"github.com/csams/todo/vectorstore/pgvector"
 	"github.com/spf13/cobra"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
@@ -152,20 +153,24 @@ func setupVector(gs *gormstore.GormStore) error {
 	}
 
 	// Create vector store
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	vs, err := chromadb.New(ctx,
-		cfg.Vector.ChromaDB.URL,
-		cfg.Vector.ChromaDB.Collection,
-		cfg.Vector.ChromaDB.Tenant,
-		cfg.Vector.ChromaDB.Database,
-		cfg.Vector.ChromaDB.AuthToken,
-	)
-	if err != nil {
-		return fmt.Errorf("vector store: %w", err)
+	var vs vectorstore.VectorStore
+	switch cfg.Vector.Store {
+	case "pgvector":
+		if cfg.DB.Driver != "postgres" {
+			return fmt.Errorf("pgvector requires PostgreSQL (db.driver=postgres); " +
+				"set vector.enabled=false for SQLite")
+		}
+		vs, err = pgvector.New(gs.DB(), emb.ModelName(), emb.Dimensions())
+		if err != nil {
+			return fmt.Errorf("pgvector store: %w", err)
+		}
+	default:
+		return fmt.Errorf("unknown vector store: %q", cfg.Vector.Store)
 	}
 
 	// Check dimension mismatch
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	storedModel, storedDims, _ := vs.CollectionInfo(ctx)
 	if storedModel != "" && storedDims > 0 {
 		if storedDims != emb.Dimensions() {

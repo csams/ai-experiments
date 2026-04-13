@@ -65,6 +65,12 @@ func (s *GormStore) AddObserver(o store.StoreObserver) {
 	s.observers = append(s.observers, o)
 }
 
+// DB returns the underlying *gorm.DB handle. Used by pgvector to share the
+// database connection.
+func (s *GormStore) DB() *gorm.DB {
+	return s.db
+}
+
 func (s *GormStore) emit(ctx context.Context, event store.StoreEvent) {
 	event.Source = s.source
 	s.mu.RLock()

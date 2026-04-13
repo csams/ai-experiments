@@ -31,10 +31,11 @@ embed/           # Embedder interface
 embed/ollama/    # Ollama embedding implementation
 embed/openai/    # OpenAI embedding implementation
 vectorstore/     # VectorStore interface
-vectorstore/chromadb/ # ChromaDB implementation
+vectorstore/pgvector/ # pgvector (PostgreSQL) implementation
 audit/           # Structured audit logger (StoreObserver)
 cmd/             # Cobra CLI commands
 mcp/             # MCP server and tool definitions
+scripts/         # Cert generation and container entrypoint helpers
 deploy/          # Systemd quadlet files and production config
 ```
 
@@ -44,7 +45,7 @@ deploy/          # Systemd quadlet files and production config
 - **`store.StoreObserver`** — receives `StoreEvent` after mutations. Used by `audit.Logger` and `synced.VectorSyncer`.
 - **`store.SemanticSearcher`** — vector similarity search. Implemented by `synced.VectorSyncer`.
 - **`embed.Embedder`** — generates vector embeddings. Implementations: `ollama.Embedder`, `openai.Embedder`.
-- **`vectorstore.VectorStore`** — vector storage and search. Implementation: `chromadb.Store`.
+- **`vectorstore.VectorStore`** — vector storage and search. Implementation: `pgvector.Store`.
 
 ## MCP Server
 
@@ -125,23 +126,70 @@ Tasks can be organized in parent-child trees. Use `set_parent` / `unparent`.
 
 ## Vector / RAG Setup
 
-Enable in config:
+Enable in config (requires PostgreSQL with the pgvector extension):
 
 ```yaml
 vector:
   enabled: true
   embedder: ollama
-  store: chromadb
+  store: pgvector
   ollama:
     model: nomic-embed-text
     url: http://localhost:11434
-  chromadb:
-    url: http://localhost:8000
-    collection: todo
-    auth_token: ""  # optional; set via TODO_VECTOR_CHROMADB_AUTH_TOKEN
 ```
 
-Requires Ollama and ChromaDB running. Use `todo vector reindex` to build/rebuild the index.
+Requires Ollama running and PostgreSQL with the pgvector extension (`pgvector/pgvector:pg16` image). Use `todo vector reindex` to build/rebuild the index.
+
+Vector search is only available with the PostgreSQL backend. When using SQLite, vector search is automatically disabled.
+
+## TLS Certificates
+
+The deployment uses a local CA to issue TLS serving certificates for PostgreSQL and the MCP server.
+
+### Generating Certificates
+
+```bash
+make certs          # Generate CA + serving certs (idempotent, skips existing)
+make certs-renew    # Regenerate serving certs (preserves CA)
+```
+
+Certs are stored in `~/.config/todo/certs/`:
+
+```
+ca.key          # CA private key (never mounted into containers)
+ca.crt          # CA certificate (distributed to services that need trust)
+postgres/       # PostgreSQL serving cert + key
+mcp/            # MCP server serving cert + key
+```
+
+### Trusting the CA
+
+External clients need to trust the CA to connect to the MCP server over HTTPS.
+
+**curl:**
+```bash
+curl --cacert ~/.config/todo/certs/ca.crt https://localhost:8082/mcp
+```
+
+**System trust store (Fedora/RHEL):**
+```bash
+sudo cp ~/.config/todo/certs/ca.crt /etc/pki/ca-trust/source/anchors/todo-local-ca.crt
+sudo update-ca-trust
+```
+
+**System trust store (Debian/Ubuntu):**
+```bash
+sudo cp ~/.config/todo/certs/ca.crt /usr/local/share/ca-certificates/todo-local-ca.crt
+sudo update-ca-certificates
+```
+
+**Claude Code MCP (remote HTTP):**
+Once the CA is in the system trust store, configure the MCP server as a remote HTTP endpoint. Alternatively, use stdio transport which bypasses TLS entirely.
+
+### Deployment Notes
+
+- PostgreSQL: The `pg-start-ssl.sh` wrapper copies certs to a postgres-owned directory at container startup to handle file permission requirements. The pgvector extension shares PostgreSQL's TLS configuration.
+- MCP server: Uses `UserNS=keep-id` to map the host user to container uid 65534 (nobody), preserving the non-root runtime from the Containerfile while allowing cert key access.
 
 ## Configuration
 
