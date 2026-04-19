@@ -15,9 +15,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	srv.AddTool(mcpgo.NewTool("create_task",
 		mcpgo.WithDescription("Create a new task. Returns the created task with tags."),
 		mcpgo.WithString("title", mcpgo.Required(), mcpgo.Description("Task title (max 512 chars)"), mcpgo.MaxLength(512)),
-		mcpgo.WithString("description", mcpgo.Description("Task description")),
-		mcpgo.WithNumber("priority", mcpgo.Description("Priority (lower = more important, negative OK)")),
-		mcpgo.WithString("due_at", mcpgo.Description("Due date in YYYY-MM-DD format")),
+		mcpgo.WithString("description", mcpgo.Description("Task description (max 100000 chars)"), mcpgo.MaxLength(100000)),
+		mcpgo.WithNumber("priority", mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
+		mcpgo.WithString("due_at", mcpgo.Description("Due date (YYYY-MM-DD)")),
 		mcpgo.WithArray("tags", mcpgo.Description("Tags (alphanumeric/hyphens/underscores only, max 100 chars each)"), mcpgo.WithStringItems(mcpgo.MaxLength(100)), mcpgo.MaxItems(50)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		title, err := requireStr(req, "title")
@@ -47,9 +47,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		mcpgo.WithDescription("Create a subtask under an existing non-archived parent. Returns full task detail including parent info."),
 		mcpgo.WithNumber("parent_id", mcpgo.Required(), mcpgo.Description("Parent task ID"), mcpgo.Min(1)),
 		mcpgo.WithString("title", mcpgo.Required(), mcpgo.Description("Task title (max 512 chars)"), mcpgo.MaxLength(512)),
-		mcpgo.WithString("description", mcpgo.Description("Task description")),
-		mcpgo.WithNumber("priority", mcpgo.Description("Priority (lower = more important, negative OK)")),
-		mcpgo.WithString("due_at", mcpgo.Description("Due date in YYYY-MM-DD format")),
+		mcpgo.WithString("description", mcpgo.Description("Task description (max 100000 chars)"), mcpgo.MaxLength(100000)),
+		mcpgo.WithNumber("priority", mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
+		mcpgo.WithString("due_at", mcpgo.Description("Due date (YYYY-MM-DD)")),
 		mcpgo.WithArray("tags", mcpgo.Description("Tags (alphanumeric/hyphens/underscores only, max 100 chars each)"), mcpgo.WithStringItems(mcpgo.MaxLength(100)), mcpgo.MaxItems(50)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		parentID, err := requireUint(req, "parent_id")
@@ -93,7 +93,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		mcpgo.WithBoolean("include_archived", mcpgo.Description("Include archived tasks")),
 		mcpgo.WithBoolean("include_subtasks", mcpgo.Description("Include subtasks (flat list)")),
 		mcpgo.WithNumber("parent_id", mcpgo.Description("Filter to subtree of this task ID (includes root)"), mcpgo.Min(1)),
-		mcpgo.WithArray("tags", mcpgo.Description("Filter by tags (AND logic)"), mcpgo.WithStringItems()),
+		mcpgo.WithArray("tags", mcpgo.Description("Filter by tags (AND logic)"), mcpgo.WithStringItems(mcpgo.MaxLength(100)), mcpgo.MaxItems(50)),
 		mcpgo.WithBoolean("overdue", mcpgo.Description("Only tasks past their due date")),
 		mcpgo.WithString("sort_by", mcpgo.Description("Sort field (default: priority)"), mcpgo.Enum("priority", "due", "created", "updated")),
 		mcpgo.WithBoolean("has_due_date",
@@ -160,9 +160,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// get_task
 	srv.AddTool(mcpgo.NewTool("get_task",
 		mcpgo.WithDescription("Get full task detail including blockers, blocking, children, notes, links, and tags."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -176,14 +176,14 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// update_task
 	srv.AddTool(mcpgo.NewTool("update_task",
 		mcpgo.WithDescription("Update a task's title, description, priority, or due date. Only provided fields are changed."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
-		mcpgo.WithString("title", mcpgo.Description("New title (max 512 chars)"), mcpgo.MaxLength(512)),
-		mcpgo.WithString("description", mcpgo.Description("New description")),
-		mcpgo.WithNumber("priority", mcpgo.Description("New priority")),
-		mcpgo.WithString("due_at", mcpgo.Description("New due date (YYYY-MM-DD)")),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithString("title", mcpgo.Description("Task title (max 512 chars)"), mcpgo.MaxLength(512)),
+		mcpgo.WithString("description", mcpgo.Description("Task description (max 100000 chars)"), mcpgo.MaxLength(100000)),
+		mcpgo.WithNumber("priority", mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
+		mcpgo.WithString("due_at", mcpgo.Description("Due date (YYYY-MM-DD)")),
 		mcpgo.WithBoolean("clear_due", mcpgo.Description("Remove due date (takes precedence over due_at if both provided)")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -221,10 +221,10 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// set_task_state
 	srv.AddTool(mcpgo.NewTool("set_task_state",
 		mcpgo.WithDescription("Set task state. Cannot set Blocked directly — use add_blockers instead. Setting Done auto-unblocks dependents whose blockers are all complete."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithString("state", mcpgo.Required(), mcpgo.Description("Target state"), mcpgo.Enum("New", "Progressing", "Unblocked", "Done")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -242,10 +242,10 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// add_blockers
 	srv.AddTool(mcpgo.NewTool("add_blockers",
 		mcpgo.WithDescription("Add blocking dependencies. Transitions task to Blocked state. Validates no self-blocking or cycles. Blocker must not be Done or archived. Promotes blocker priority to at least match blocked task."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID to block"), mcpgo.Min(1)),
-		mcpgo.WithArray("blocker_ids", mcpgo.Required(), mcpgo.Description("IDs of tasks that block this one"), mcpgo.WithNumberItems(mcpgo.Min(1))),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID to block"), mcpgo.Min(1)),
+		mcpgo.WithArray("blocker_ids", mcpgo.Required(), mcpgo.Description("IDs of tasks that block this one"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -263,10 +263,10 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// remove_blockers
 	srv.AddTool(mcpgo.NewTool("remove_blockers",
 		mcpgo.WithDescription("Remove specific blockers. Auto-transitions to Unblocked if no blockers remain."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
-		mcpgo.WithArray("blocker_ids", mcpgo.Required(), mcpgo.Description("Blocker IDs to remove"), mcpgo.WithNumberItems(mcpgo.Min(1))),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithArray("blocker_ids", mcpgo.Required(), mcpgo.Description("Blocker IDs to remove"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -284,9 +284,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// archive_task
 	srv.AddTool(mcpgo.NewTool("archive_task",
 		mcpgo.WithDescription("Archive task and its entire subtask tree. Fails if any task in the set blocks an external task. Preserves blocker entries."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -303,9 +303,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// unarchive_task
 	srv.AddTool(mcpgo.NewTool("unarchive_task",
 		mcpgo.WithDescription("Unarchive task and its entire subtask tree. Validates preserved blocker relationships."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -322,26 +322,26 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// delete_task
 	srv.AddTool(mcpgo.NewTool("delete_task",
 		mcpgo.WithDescription("Delete a task. recursive=false (default): promotes subtasks to top-level. recursive=true: permanently deletes this task AND all subtasks. Fails if any affected task blocks an external task."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithBoolean("recursive", mcpgo.Description("Delete entire subtask tree (default: false, promotes subtasks)")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
 		if err := s.DeleteTask(ctx, id, getBool(req, "recursive")); err != nil {
 			return errResult(err), nil
 		}
-		return textResult(toJSON(map[string]any{"id": id, "deleted": true})), nil
+		return textResult(toJSON(map[string]any{"task_id": id, "deleted": true})), nil
 	})
 
 	// set_parent
 	srv.AddTool(mcpgo.NewTool("set_parent",
 		mcpgo.WithDescription("Make a task a subtask of another. Validates no cycles. Returns full task detail."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithNumber("parent_id", mcpgo.Required(), mcpgo.Description("Parent task ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -362,9 +362,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// unparent
 	srv.AddTool(mcpgo.NewTool("unparent",
 		mcpgo.WithDescription("Make a task top-level (remove from parent). Returns full task detail."),
-		mcpgo.WithNumber("id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "id")
+		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}

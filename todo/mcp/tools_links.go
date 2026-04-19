@@ -52,7 +52,7 @@ func registerLinkTools(srv *server.MCPServer, s store.Store) {
 	})
 
 	srv.AddTool(mcpgo.NewTool("delete_link",
-		mcpgo.WithDescription("Delete a link"),
+		mcpgo.WithDescription("Delete a link from a task."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithNumber("link_id", mcpgo.Required(), mcpgo.Description("Link ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -67,6 +67,6 @@ func registerLinkTools(srv *server.MCPServer, s store.Store) {
 		if err := s.DeleteLink(ctx, taskID, linkID); err != nil {
 			return errResult(err), nil
 		}
-		return textResult("deleted"), nil
+		return textResult(toJSON(map[string]any{"task_id": taskID, "link_id": linkID, "deleted": true})), nil
 	})
 }

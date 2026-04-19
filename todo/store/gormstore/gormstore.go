@@ -11,9 +11,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/csams/todo/model"
 	"github.com/csams/todo/store"
+	"github.com/csams/todo/textutil"
 	"gorm.io/gorm"
 )
 
@@ -111,63 +113,103 @@ func validateID(id uint) error {
 	return nil
 }
 
-func validateTitle(title string) error {
-	if strings.TrimSpace(title) == "" {
-		return &model.ValidationError{Field: "title", Message: "required and non-empty"}
+func validateTitle(title string) (string, error) {
+	clean, err := textutil.Sanitize(title)
+	if err != nil {
+		return "", &model.ValidationError{Field: "title", Message: err.Error()}
 	}
-	if len(title) > 512 {
-		return &model.ValidationError{Field: "title", Message: "max 512 characters"}
+	if clean == "" {
+		return "", &model.ValidationError{Field: "title", Message: "required and non-empty"}
 	}
-	return nil
+	if utf8.RuneCountInString(clean) > 512 {
+		return "", &model.ValidationError{Field: "title", Message: "max 512 characters"}
+	}
+	return clean, nil
 }
 
-func validateTag(tag string) error {
-	if tag == "" {
-		return &model.ValidationError{Field: "tag", Message: "non-empty"}
+func validateDescription(desc string) (string, error) {
+	if desc == "" {
+		return "", nil
 	}
-	if len(tag) > 100 {
-		return &model.ValidationError{Field: "tag", Message: "max 100 characters"}
+	clean, err := textutil.Sanitize(desc)
+	if err != nil {
+		return "", &model.ValidationError{Field: "description", Message: err.Error()}
 	}
-	if !tagRegex.MatchString(tag) {
-		return &model.ValidationError{Field: "tag", Message: "alphanumeric, hyphens, underscores only"}
+	if utf8.RuneCountInString(clean) > 100000 {
+		return "", &model.ValidationError{Field: "description", Message: "max 100000 characters"}
 	}
-	return nil
+	return clean, nil
 }
 
-func validateTags(tags []string) error {
-	for _, t := range tags {
-		if err := validateTag(t); err != nil {
-			return err
+func validateTag(tag string) (string, error) {
+	clean, err := textutil.Sanitize(tag)
+	if err != nil {
+		return "", &model.ValidationError{Field: "tag", Message: err.Error()}
+	}
+	if clean == "" {
+		return "", &model.ValidationError{Field: "tag", Message: "non-empty"}
+	}
+	if len(clean) > 100 {
+		return "", &model.ValidationError{Field: "tag", Message: "max 100 characters"}
+	}
+	if !tagRegex.MatchString(clean) {
+		return "", &model.ValidationError{Field: "tag", Message: "alphanumeric, hyphens, underscores only"}
+	}
+	return clean, nil
+}
+
+func validateTags(tags []string) ([]string, error) {
+	clean := make([]string, len(tags))
+	for i, t := range tags {
+		c, err := validateTag(t)
+		if err != nil {
+			return nil, err
 		}
+		clean[i] = c
 	}
-	return nil
+	return clean, nil
 }
 
-func validateNoteText(text string) error {
-	if strings.TrimSpace(text) == "" {
-		return &model.ValidationError{Field: "text", Message: "required and non-empty"}
+func validateNoteText(text string) (string, error) {
+	clean, err := textutil.Sanitize(text)
+	if err != nil {
+		return "", &model.ValidationError{Field: "text", Message: err.Error()}
 	}
-	return nil
+	if clean == "" {
+		return "", &model.ValidationError{Field: "text", Message: "required and non-empty"}
+	}
+	if utf8.RuneCountInString(clean) > 50000 {
+		return "", &model.ValidationError{Field: "text", Message: "max 50000 characters"}
+	}
+	return clean, nil
 }
 
-func validateLinkURL(url string) error {
-	if strings.TrimSpace(url) == "" {
-		return &model.ValidationError{Field: "url", Message: "required and non-empty"}
+func validateLinkURL(url string) (string, error) {
+	clean, err := textutil.Sanitize(url)
+	if err != nil {
+		return "", &model.ValidationError{Field: "url", Message: err.Error()}
 	}
-	if len(url) > 2000 {
-		return &model.ValidationError{Field: "url", Message: "max 2000 characters"}
+	if clean == "" {
+		return "", &model.ValidationError{Field: "url", Message: "required and non-empty"}
 	}
-	return nil
+	if len(clean) > 2000 {
+		return "", &model.ValidationError{Field: "url", Message: "max 2000 bytes"}
+	}
+	return clean, nil
 }
 
-func validateSearchQuery(q string) error {
-	if strings.TrimSpace(q) == "" {
-		return &model.ValidationError{Field: "query", Message: "required and non-empty"}
+func validateSearchQuery(q string) (string, error) {
+	clean, err := textutil.Sanitize(q)
+	if err != nil {
+		return "", &model.ValidationError{Field: "query", Message: err.Error()}
 	}
-	if len(q) > 500 {
-		return &model.ValidationError{Field: "query", Message: "max 500 characters"}
+	if clean == "" {
+		return "", &model.ValidationError{Field: "query", Message: "required and non-empty"}
 	}
-	return nil
+	if utf8.RuneCountInString(clean) > 500 {
+		return "", &model.ValidationError{Field: "query", Message: "max 500 characters"}
+	}
+	return clean, nil
 }
 
 // --- LIKE wildcard escaping ---
@@ -380,10 +422,14 @@ func (s *GormStore) checkExternalBlockers(tx *gorm.DB, taskIDs []uint) error {
 // --- CRUD: Tasks ---
 
 func (s *GormStore) CreateTask(ctx context.Context, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error) {
-	if err := validateTitle(title); err != nil {
+	var err error
+	if title, err = validateTitle(title); err != nil {
 		return nil, err
 	}
-	if err := validateTags(tags); err != nil {
+	if description, err = validateDescription(description); err != nil {
+		return nil, err
+	}
+	if tags, err = validateTags(tags); err != nil {
 		return nil, err
 	}
 
@@ -396,7 +442,7 @@ func (s *GormStore) CreateTask(ctx context.Context, title, description string, p
 	}
 
 	db := s.db.WithContext(ctx)
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&task).Error; err != nil {
 			return err
 		}
@@ -429,10 +475,14 @@ func (s *GormStore) CreateSubtask(ctx context.Context, parentID uint, title, des
 	if err := validateID(parentID); err != nil {
 		return nil, err
 	}
-	if err := validateTitle(title); err != nil {
+	var err error
+	if title, err = validateTitle(title); err != nil {
 		return nil, err
 	}
-	if err := validateTags(tags); err != nil {
+	if description, err = validateDescription(description); err != nil {
+		return nil, err
+	}
+	if tags, err = validateTags(tags); err != nil {
 		return nil, err
 	}
 
@@ -446,7 +496,7 @@ func (s *GormStore) CreateSubtask(ctx context.Context, parentID uint, title, des
 	}
 
 	db := s.db.WithContext(ctx)
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExistsActive(tx, parentID); err != nil {
 			return err
 		}
@@ -573,12 +623,22 @@ func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) 
 	}
 
 	// Tag filter (AND logic)
-	for _, tag := range opts.Tags {
-		q = q.Where("id IN (SELECT task_id FROM task_tags WHERE tag = ?)", tag)
+	if len(opts.Tags) > 0 {
+		cleanTags, err := validateTags(opts.Tags)
+		if err != nil {
+			return nil, err
+		}
+		for _, tag := range cleanTags {
+			q = q.Where("id IN (SELECT task_id FROM task_tags WHERE tag = ?)", tag)
+		}
 	}
 	// Tag subset filter: task's tags must all be within the given set
 	if len(opts.TagsSubsetOf) > 0 {
-		q = q.Where("NOT EXISTS (SELECT 1 FROM task_tags WHERE task_tags.task_id = tasks.id AND tag NOT IN ?)", opts.TagsSubsetOf)
+		cleanSubset, err := validateTags(opts.TagsSubsetOf)
+		if err != nil {
+			return nil, err
+		}
+		q = q.Where("NOT EXISTS (SELECT 1 FROM task_tags WHERE task_tags.task_id = tasks.id AND tag NOT IN ?)", cleanSubset)
 	}
 
 	// Sort
@@ -633,15 +693,20 @@ func (s *GormStore) UpdateTask(ctx context.Context, id uint, opts store.UpdateTa
 		changes = map[string]store.Change{}
 
 		if opts.Title != nil {
-			if err := validateTitle(*opts.Title); err != nil {
+			cleanTitle, err := validateTitle(*opts.Title)
+			if err != nil {
 				return err
 			}
-			changes["title"] = store.Change{Old: task.Title, New: *opts.Title}
-			updates["title"] = *opts.Title
+			changes["title"] = store.Change{Old: task.Title, New: cleanTitle}
+			updates["title"] = cleanTitle
 		}
 		if opts.Description != nil {
-			changes["description"] = store.Change{Old: task.Description, New: *opts.Description}
-			updates["description"] = *opts.Description
+			cleanDesc, err := validateDescription(*opts.Description)
+			if err != nil {
+				return err
+			}
+			changes["description"] = store.Change{Old: task.Description, New: cleanDesc}
+			updates["description"] = cleanDesc
 		}
 		if opts.Priority != nil {
 			newPriority := *opts.Priority
@@ -1137,13 +1202,14 @@ func (s *GormStore) deleteTaskData(tx *gorm.DB, taskID uint) error {
 // --- Search ---
 
 func (s *GormStore) SearchTasks(ctx context.Context, query string) ([]model.Task, error) {
-	if err := validateSearchQuery(query); err != nil {
+	var err error
+	if query, err = validateSearchQuery(query); err != nil {
 		return nil, err
 	}
 	db := s.db.WithContext(ctx)
 	pattern := "%" + escapeLike(strings.ToLower(query)) + "%"
 	var tasks []model.Task
-	err := db.Where("LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(description) LIKE ? ESCAPE '\\'", pattern, pattern).
+	err = db.Where("LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(description) LIKE ? ESCAPE '\\'", pattern, pattern).
 		Order("priority ASC").
 		Limit(defaultQueryLimit).
 		Find(&tasks).Error
@@ -1151,13 +1217,14 @@ func (s *GormStore) SearchTasks(ctx context.Context, query string) ([]model.Task
 }
 
 func (s *GormStore) SearchNotes(ctx context.Context, query string) ([]model.Note, error) {
-	if err := validateSearchQuery(query); err != nil {
+	var err error
+	if query, err = validateSearchQuery(query); err != nil {
 		return nil, err
 	}
 	db := s.db.WithContext(ctx)
 	pattern := "%" + escapeLike(strings.ToLower(query)) + "%"
 	var notes []model.Note
-	err := db.Where("LOWER(text) LIKE ? ESCAPE '\\'", pattern).Limit(defaultQueryLimit).Find(&notes).Error
+	err = db.Where("LOWER(text) LIKE ? ESCAPE '\\'", pattern).Limit(defaultQueryLimit).Find(&notes).Error
 	return notes, err
 }
 
@@ -1304,12 +1371,13 @@ func (s *GormStore) BulkAddTags(ctx context.Context, ids []uint, tags []string) 
 	if len(ids) > maxBulkIDs {
 		return &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
 	}
-	if err := validateTags(tags); err != nil {
+	var err error
+	if tags, err = validateTags(tags); err != nil {
 		return err
 	}
 
 	db := s.db.WithContext(ctx)
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		for _, id := range ids {
 			if err := validateID(id); err != nil {
 				return err
@@ -1352,9 +1420,13 @@ func (s *GormStore) BulkRemoveTags(ctx context.Context, ids []uint, tags []strin
 	if len(ids) > maxBulkIDs {
 		return &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
 	}
+	var err error
+	if tags, err = validateTags(tags); err != nil {
+		return err
+	}
 
 	db := s.db.WithContext(ctx)
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		for _, id := range ids {
 			if err := validateID(id); err != nil {
 				return err
@@ -1388,12 +1460,13 @@ func (s *GormStore) AddTags(ctx context.Context, taskID uint, tags []string) err
 	if err := validateID(taskID); err != nil {
 		return err
 	}
-	if err := validateTags(tags); err != nil {
+	var err error
+	if tags, err = validateTags(tags); err != nil {
 		return err
 	}
 
 	db := s.db.WithContext(ctx)
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExistsActive(tx, taskID); err != nil {
 			return err
 		}
@@ -1431,9 +1504,13 @@ func (s *GormStore) RemoveTags(ctx context.Context, taskID uint, tags []string) 
 	if err := validateID(taskID); err != nil {
 		return err
 	}
+	var err error
+	if tags, err = validateTags(tags); err != nil {
+		return err
+	}
 
 	db := s.db.WithContext(ctx)
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExistsActive(tx, taskID); err != nil {
 			return err
 		}
@@ -1465,13 +1542,14 @@ func (s *GormStore) AddLink(ctx context.Context, taskID uint, linkType model.Lin
 	if !model.ValidLinkTypes[linkType] {
 		return nil, &model.ValidationError{Field: "type", Message: fmt.Sprintf("invalid link type: %s", linkType)}
 	}
-	if err := validateLinkURL(url); err != nil {
+	var err error
+	if url, err = validateLinkURL(url); err != nil {
 		return nil, err
 	}
 
 	db := s.db.WithContext(ctx)
 	link := model.Link{TaskID: taskID, Type: linkType, URL: url}
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExistsActive(tx, taskID); err != nil {
 			return err
 		}
@@ -1530,13 +1608,14 @@ func (s *GormStore) AddNote(ctx context.Context, taskID uint, text string) (*mod
 	if err := validateID(taskID); err != nil {
 		return nil, err
 	}
-	if err := validateNoteText(text); err != nil {
+	var err error
+	if text, err = validateNoteText(text); err != nil {
 		return nil, err
 	}
 
 	db := s.db.WithContext(ctx)
 	note := model.Note{TaskID: taskID, Text: text}
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExistsActive(tx, taskID); err != nil {
 			return err
 		}
@@ -1562,13 +1641,14 @@ func (s *GormStore) UpdateNote(ctx context.Context, taskID uint, noteID uint, te
 	if err := validateID(noteID); err != nil {
 		return nil, err
 	}
-	if err := validateNoteText(text); err != nil {
+	var err error
+	if text, err = validateNoteText(text); err != nil {
 		return nil, err
 	}
 
 	db := s.db.WithContext(ctx)
 	var note model.Note
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExistsActive(tx, taskID); err != nil {
 			return err
 		}

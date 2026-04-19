@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/csams/todo/model"
+	"github.com/csams/todo/textutil"
 	"github.com/spf13/cobra"
 )
 
@@ -81,10 +82,7 @@ func outputTaskList(tasks []model.Task) {
 		if t.ParentID != nil {
 			parent = fmt.Sprintf("%d", *t.ParentID)
 		}
-		title := t.Title
-		if len(title) > 50 {
-			title = title[:47] + "..."
-		}
+		title := textutil.TruncateRunes(t.Title, 50, "...")
 		tags := tagNames(t.Tags)
 		archived := ""
 		if t.Archived {
@@ -201,10 +199,7 @@ func tagNames(tags []model.TaskTag) string {
 
 func truncate(s string, max int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-3] + "..."
+	return textutil.TruncateRunes(s, max, "...")
 }
 
 // parseDate parses a YYYY-MM-DD date string into a UTC time.Time.

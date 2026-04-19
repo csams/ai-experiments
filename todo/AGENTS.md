@@ -133,11 +133,12 @@ Blockers are automatically promoted to at least match the priority of tasks they
 
 ## Validation Rules
 
-- **Title**: required, max 512 characters
-- **Description**: optional, no length limit
+- **All string fields**: Must be valid UTF-8, no null bytes; normalized to NFC on input; leading/trailing whitespace trimmed
+- **Title**: required, max 512 characters (Unicode code points)
+- **Description**: optional, max 100,000 characters
 - **Tags**: alphanumeric, hyphens, and underscores only (`[a-zA-Z0-9_-]+`), max 100 chars per tag, max 50 tags per task
-- **Notes**: required non-empty text, no length limit
-- **Links**: URL required, max 2000 characters
+- **Notes**: required non-empty text, max 50,000 characters
+- **Links**: URL required, max 2000 bytes
 - **Search queries**: max 500 characters
 - **Bulk operations**: max 100 IDs per call
 

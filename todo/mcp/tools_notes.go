@@ -12,7 +12,7 @@ func registerNoteTools(srv *server.MCPServer, s store.Store) {
 	srv.AddTool(mcpgo.NewTool("add_note",
 		mcpgo.WithDescription("Add a note to a task. Returns the created note."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
-		mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Note text")),
+		mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Note text (max 50000 chars)"), mcpgo.MaxLength(50000)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		taskID, err := requireUint(req, "task_id")
 		if err != nil {
@@ -33,7 +33,7 @@ func registerNoteTools(srv *server.MCPServer, s store.Store) {
 		mcpgo.WithDescription("Update a note's text. Returns the updated note."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithNumber("note_id", mcpgo.Required(), mcpgo.Description("Note ID"), mcpgo.Min(1)),
-		mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("New text")),
+		mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Note text (max 50000 chars)"), mcpgo.MaxLength(50000)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		taskID, err := requireUint(req, "task_id")
 		if err != nil {
@@ -70,7 +70,7 @@ func registerNoteTools(srv *server.MCPServer, s store.Store) {
 	})
 
 	srv.AddTool(mcpgo.NewTool("delete_note",
-		mcpgo.WithDescription("Delete a note"),
+		mcpgo.WithDescription("Delete a note from a task."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithNumber("note_id", mcpgo.Required(), mcpgo.Description("Note ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -85,6 +85,6 @@ func registerNoteTools(srv *server.MCPServer, s store.Store) {
 		if err := s.DeleteNote(ctx, taskID, noteID); err != nil {
 			return errResult(err), nil
 		}
-		return textResult("deleted"), nil
+		return textResult(toJSON(map[string]any{"task_id": taskID, "note_id": noteID, "deleted": true})), nil
 	})
 }

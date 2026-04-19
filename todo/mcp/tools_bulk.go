@@ -38,7 +38,7 @@ func registerBulkTools(srv *server.MCPServer, s store.Store) {
 	srv.AddTool(mcpgo.NewTool("bulk_update_priority",
 		mcpgo.WithDescription("Set priority on multiple tasks (max 100) atomically. Blockers are promoted to at least match the priority of tasks they block. Returns updated tasks."),
 		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
-		mcpgo.WithNumber("priority", mcpgo.Required(), mcpgo.Description("Target priority")),
+		mcpgo.WithNumber("priority", mcpgo.Required(), mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		ids, err := requireUintSlice(req, "ids")
 		if err != nil {
