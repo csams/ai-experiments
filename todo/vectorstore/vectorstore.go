@@ -4,10 +4,11 @@ import "context"
 
 // Document represents an embedded document stored in the vector database.
 type Document struct {
-	ID       string            // e.g., "task:42", "note:17"
-	Text     string            // the text that was embedded
-	Metadata map[string]any    // task_id, type ("task"/"note"), title, state, etc.
-	Vector   []float32         // embedding vector
+	ID         string         // e.g., "task:42:0", "note:17:2"
+	Text       string         // the text that was embedded
+	Metadata   map[string]any // task_id, type ("task"/"note"), title, state, etc.
+	Vector     []float32      // embedding vector
+	ChunkIndex int            // 0-based chunk index within the parent doc
 }
 
 // SearchResult is a single result from vector similarity search.
@@ -18,10 +19,11 @@ type SearchResult struct {
 
 // SearchFilter controls vector search filtering.
 type SearchFilter struct {
-	Type       *string  // "task", "note"
-	TaskID     *uint    // filter to a specific task's entities
-	Archived   *bool    // filter by archived status
-	ExcludeIDs []string // exclude specific document IDs
+	Type          *string  // "task", "note"
+	TaskID        *uint    // filter to a specific task's entities
+	Archived      *bool    // filter by archived status
+	ExcludeIDs    []string // exclude specific document IDs
+	ExcludeTaskID *uint    // exclude all rows where task_id matches (e.g., the source of a context search)
 }
 
 // VectorStore provides vector storage and similarity search.
@@ -31,6 +33,12 @@ type VectorStore interface {
 
 	// Delete removes documents by their IDs.
 	Delete(ctx context.Context, ids []string) error
+
+	// DeleteTaskDocs removes all chunks for the given task.
+	DeleteTaskDocs(ctx context.Context, taskID uint) error
+
+	// DeleteNoteDocs removes all chunks for the given note.
+	DeleteNoteDocs(ctx context.Context, noteID uint) error
 
 	// Search finds the most similar documents to the query vector.
 	Search(ctx context.Context, query []float32, limit int, filter SearchFilter) ([]SearchResult, error)

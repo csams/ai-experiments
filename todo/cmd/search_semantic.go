@@ -109,8 +109,10 @@ func outputSemanticResults(results []store.SemanticSearchResult) {
 		if t, ok := r.Metadata["type"].(string); ok {
 			docType = t
 		}
-		text := truncate(r.Text, 80)
-		fmt.Printf("[%.3f] %s %s: %s\n", r.Score, docType, r.ID, text)
+		fmt.Printf("[%.3f] %s %s\n", r.Score, docType, r.ID)
+		for _, c := range r.Chunks {
+			fmt.Printf("    [chunk %d, %.3f] %s\n", c.ChunkIndex, c.Score, truncate(c.Text, 100))
+		}
 	}
 }
 

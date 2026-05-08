@@ -186,6 +186,12 @@ Vector search is only available with the PostgreSQL backend. When using SQLite, 
 
 A task's embedding text includes its title, description, tags, link descriptions, priority, and state. Notes are embedded as separate documents (both attached and standalone notes appear in `semantic_search` results). Link `description` content is therefore searchable via `semantic_search`; URLs and link types are not embedded. Adding/updating/deleting a link automatically re-embeds its parent task. Reparenting a note re-embeds the note (with new `task_id` metadata) but does not re-embed any task, since task embeddings do not include note text.
 
+### Chunking
+
+Long descriptions and notes are split into overlapping ~3000-rune chunks (200-rune overlap) before embedding, so content past `nomic-embed-text`'s ~2048-token training window stays searchable. Each chunk gets a header (task title + tags + state, or for notes "Note for: <parent title>") so mid-body chunks remain self-contained for retrieval. Storage row IDs are `task:<id>:<chunkIdx>` and `note:<id>:<chunkIdx>`. `semantic_search` and `semantic_search_context` aggregate per-doc: each result lists every matched chunk in `Chunks[]` (sorted by score) with the parent doc's best score as `Score`.
+
+**Migration callout (breaking storage change):** the row ID format changed and a `chunk_index` column was added to `vector_documents`. The schema migration is automatic on first connect. Old single-doc rows (`task:42`, `note:17`) won't be overwritten by the new chunked IDs, but the sync paths (`embedTasks`/`embedNotes`/`Reindex`) call `DeleteTaskDocs`/`DeleteNoteDocs` before re-upserting, which clears them out for any task or note that gets touched. The recommended migration step is **`todo vector reindex --clear`** — it drops the table outright, which also removes orphaned rows for tasks deleted before the upgrade. A plain `todo vector reindex` (no `--clear`) will clean up old rows for *current* tasks and notes but leaves orphans behind.
+
 ## TLS Certificates
 
 The deployment uses a local CA to issue TLS serving certificates for PostgreSQL and the MCP server.

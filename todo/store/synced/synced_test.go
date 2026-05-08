@@ -2,9 +2,9 @@ package synced_test
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -85,6 +85,34 @@ func (m *mockVectorStore) Delete(_ context.Context, ids []string) error {
 	return nil
 }
 
+func (m *mockVectorStore) DeleteTaskDocs(_ context.Context, taskID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, d := range m.docs {
+		if t, _ := d.Metadata["type"].(string); t != "task" {
+			continue
+		}
+		if tid, ok := d.Metadata["task_id"].(int); ok && uint(tid) == taskID {
+			delete(m.docs, id)
+		}
+	}
+	return nil
+}
+
+func (m *mockVectorStore) DeleteNoteDocs(_ context.Context, noteID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, d := range m.docs {
+		if t, _ := d.Metadata["type"].(string); t != "note" {
+			continue
+		}
+		if nid, ok := d.Metadata["note_id"].(int); ok && uint(nid) == noteID {
+			delete(m.docs, id)
+		}
+	}
+	return nil
+}
+
 func (m *mockVectorStore) Search(_ context.Context, query []float32, limit int, filter vectorstore.SearchFilter) ([]vectorstore.SearchResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -112,6 +140,11 @@ func (m *mockVectorStore) Search(_ context.Context, query []float32, limit int, 
 		if filter.Archived != nil {
 			archived, ok := d.Metadata["archived"].(bool)
 			if !ok || archived != *filter.Archived {
+				continue
+			}
+		}
+		if filter.ExcludeTaskID != nil {
+			if tid, ok := d.Metadata["task_id"].(int); ok && uint(tid) == *filter.ExcludeTaskID {
 				continue
 			}
 		}
@@ -150,6 +183,37 @@ func (m *mockVectorStore) Reset(_ context.Context, _ string, _ int) error {
 }
 
 func (m *mockVectorStore) Close() error { return nil }
+
+// findTaskChunks returns all chunks for the given task, sorted by chunk index.
+// Caller must already hold m.mu.
+func (m *mockVectorStore) findTaskChunks(taskID uint) []vectorstore.Document {
+	var out []vectorstore.Document
+	for _, d := range m.docs {
+		if t, _ := d.Metadata["type"].(string); t != "task" {
+			continue
+		}
+		if tid, ok := d.Metadata["task_id"].(int); ok && uint(tid) == taskID {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ChunkIndex < out[j].ChunkIndex })
+	return out
+}
+
+// findNoteChunks returns all chunks for the given note. Caller must already hold m.mu.
+func (m *mockVectorStore) findNoteChunks(noteID uint) []vectorstore.Document {
+	var out []vectorstore.Document
+	for _, d := range m.docs {
+		if t, _ := d.Metadata["type"].(string); t != "note" {
+			continue
+		}
+		if nid, ok := d.Metadata["note_id"].(int); ok && uint(nid) == noteID {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ChunkIndex < out[j].ChunkIndex })
+	return out
+}
 
 func cosineSim(a, b []float32) float32 {
 	if len(a) != len(b) {
@@ -227,10 +291,11 @@ func TestSync_CreateTaskEmbedsDocument(t *testing.T) {
 	// Check vector store has the document
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
-	doc, ok := vs.docs["task:1"]
-	if !ok {
-		t.Fatal("expected task:1 in vector store")
+	chunks := vs.findTaskChunks(1)
+	if len(chunks) == 0 {
+		t.Fatal("expected task 1 chunks in vector store")
 	}
+	doc := chunks[0]
 	if doc.Metadata["type"] != "task" {
 		t.Errorf("metadata type = %v, want 'task'", doc.Metadata["type"])
 	}
@@ -254,12 +319,12 @@ func TestSync_AddNoteEmbedsDocument(t *testing.T) {
 
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
-	doc, ok := vs.docs["note:1"]
-	if !ok {
-		t.Fatal("expected note:1 in vector store")
+	chunks := vs.findNoteChunks(1)
+	if len(chunks) == 0 {
+		t.Fatal("expected note 1 chunks in vector store")
 	}
-	if doc.Text != "investigation notes here" {
-		t.Errorf("text = %q", doc.Text)
+	if !strings.Contains(chunks[0].Text, "investigation notes here") {
+		t.Errorf("chunk text should contain note body: %q", chunks[0].Text)
 	}
 }
 
@@ -272,11 +337,12 @@ func TestSync_StandaloneNoteEmbedsWithoutTaskID(t *testing.T) {
 	}
 
 	vs.mu.Lock()
-	doc, ok := vs.docs[fmt.Sprintf("note:%d", note.ID)]
+	chunks := vs.findNoteChunks(note.ID)
 	vs.mu.Unlock()
-	if !ok {
+	if len(chunks) == 0 {
 		t.Fatal("standalone note not embedded")
 	}
+	doc := chunks[0]
 	if _, present := doc.Metadata["task_id"]; present {
 		t.Errorf("standalone note metadata should omit task_id, got: %v", doc.Metadata)
 	}
@@ -300,8 +366,12 @@ func TestSync_NoteReparentReembedsMetadata(t *testing.T) {
 	}
 
 	vs.mu.Lock()
-	doc := vs.docs[fmt.Sprintf("note:%d", note.ID)]
+	chunks := vs.findNoteChunks(note.ID)
 	vs.mu.Unlock()
+	if len(chunks) == 0 {
+		t.Fatalf("expected note %d chunks", note.ID)
+	}
+	doc := chunks[0]
 	if got, ok := doc.Metadata["task_id"].(int); !ok || uint(got) != t2.ID {
 		t.Errorf("after reparent, task_id metadata = %v, want %d", doc.Metadata["task_id"], t2.ID)
 	}
@@ -313,7 +383,7 @@ func TestSync_DeleteTaskRemovesFromVectorStore(t *testing.T) {
 	s.CreateTask(bg(), "Task to delete", "", 0, nil, nil)
 
 	vs.mu.Lock()
-	_, hasBefore := vs.docs["task:1"]
+	hasBefore := len(vs.findTaskChunks(1)) > 0
 	vs.mu.Unlock()
 	if !hasBefore {
 		t.Fatal("task should be in vector store before delete")
@@ -322,7 +392,7 @@ func TestSync_DeleteTaskRemovesFromVectorStore(t *testing.T) {
 	s.DeleteTask(bg(), 1, store.DeleteTaskOptions{})
 
 	vs.mu.Lock()
-	_, hasAfter := vs.docs["task:1"]
+	hasAfter := len(vs.findTaskChunks(1)) > 0
 	vs.mu.Unlock()
 	if hasAfter {
 		t.Error("task should be removed from vector store after delete")
@@ -338,13 +408,13 @@ func TestSync_AddLinkRefreshesTaskEmbedding(t *testing.T) {
 	}
 
 	vs.mu.Lock()
-	doc, ok := vs.docs["task:1"]
+	chunks := vs.findTaskChunks(1)
 	vs.mu.Unlock()
-	if !ok {
-		t.Fatal("expected task:1 in vector store")
+	if len(chunks) == 0 {
+		t.Fatal("expected task 1 chunks in vector store")
 	}
-	if !strings.Contains(doc.Text, "original ticket describing the regression") {
-		t.Errorf("link description not folded into task embedding text: %q", doc.Text)
+	if !strings.Contains(chunks[0].Text, "original ticket describing the regression") {
+		t.Errorf("link description not folded into task embedding text: %q", chunks[0].Text)
 	}
 }
 
@@ -360,8 +430,12 @@ func TestSync_UpdateLinkDescriptionRefreshesTaskEmbedding(t *testing.T) {
 	}
 
 	vs.mu.Lock()
-	doc := vs.docs["task:1"]
+	chunks := vs.findTaskChunks(1)
 	vs.mu.Unlock()
+	if len(chunks) == 0 {
+		t.Fatal("expected task 1 chunks")
+	}
+	doc := chunks[0]
 	if strings.Contains(doc.Text, "first description") {
 		t.Errorf("stale link description should be replaced after update: %q", doc.Text)
 	}
@@ -382,10 +456,13 @@ func TestSync_ClearLinkDescriptionRefreshesTaskEmbedding(t *testing.T) {
 	}
 
 	vs.mu.Lock()
-	doc := vs.docs["task:1"]
+	chunks := vs.findTaskChunks(1)
 	vs.mu.Unlock()
-	if strings.Contains(doc.Text, "secret content to remove") {
-		t.Errorf("cleared description should be gone from embedding: %q", doc.Text)
+	if len(chunks) == 0 {
+		t.Fatal("expected task 1 chunks")
+	}
+	if strings.Contains(chunks[0].Text, "secret content to remove") {
+		t.Errorf("cleared description should be gone from embedding: %q", chunks[0].Text)
 	}
 }
 
@@ -400,10 +477,13 @@ func TestSync_DeleteLinkRefreshesTaskEmbedding(t *testing.T) {
 	}
 
 	vs.mu.Lock()
-	doc := vs.docs["task:1"]
+	chunks := vs.findTaskChunks(1)
 	vs.mu.Unlock()
-	if strings.Contains(doc.Text, "to be removed") {
-		t.Errorf("deleted link description should not be in embedding: %q", doc.Text)
+	if len(chunks) == 0 {
+		t.Fatal("expected task 1 chunks")
+	}
+	if strings.Contains(chunks[0].Text, "to be removed") {
+		t.Errorf("deleted link description should not be in embedding: %q", chunks[0].Text)
 	}
 }
 
@@ -422,13 +502,13 @@ func TestReindex_IncludesLinkDescriptions(t *testing.T) {
 	}
 
 	vs.mu.Lock()
-	doc, ok := vs.docs["task:1"]
+	chunks := vs.findTaskChunks(1)
 	vs.mu.Unlock()
-	if !ok {
-		t.Fatal("expected task:1 after reindex")
+	if len(chunks) == 0 {
+		t.Fatal("expected task 1 chunks after reindex")
 	}
-	if !strings.Contains(doc.Text, "searchable link content") {
-		t.Errorf("Reindex should include link description in task embedding: %q", doc.Text)
+	if !strings.Contains(chunks[0].Text, "searchable link content") {
+		t.Errorf("Reindex should include link description in task embedding: %q", chunks[0].Text)
 	}
 }
 
@@ -521,11 +601,14 @@ func TestReindex(t *testing.T) {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
-	expected := []string{"task:1", "task:2", "note:1"}
-	for _, id := range expected {
-		if _, ok := vs.docs[id]; !ok {
-			t.Errorf("expected %s in vector store after reindex", id)
-		}
+	if len(vs.findTaskChunks(1)) == 0 {
+		t.Errorf("expected task 1 chunks after reindex")
+	}
+	if len(vs.findTaskChunks(2)) == 0 {
+		t.Errorf("expected task 2 chunks after reindex")
+	}
+	if len(vs.findNoteChunks(1)) == 0 {
+		t.Errorf("expected note 1 chunks after reindex")
 	}
 }
 
@@ -543,11 +626,11 @@ func TestReindex_WithClear(t *testing.T) {
 
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
-	if _, ok := vs.docs["task:1"]; !ok {
-		t.Error("expected task:1 after clear reindex")
+	if len(vs.findTaskChunks(1)) == 0 {
+		t.Error("expected task 1 chunks after clear reindex")
 	}
-	if _, ok := vs.docs["note:1"]; !ok {
-		t.Error("expected note:1 after clear reindex")
+	if len(vs.findNoteChunks(1)) == 0 {
+		t.Error("expected note 1 chunks after clear reindex")
 	}
 }
 
@@ -619,8 +702,12 @@ func TestArchiveEvent_UpdatesNoteMetadata(t *testing.T) {
 
 	// Before archive, note should have archived=false
 	vs.mu.Lock()
-	noteBefore := vs.docs["note:1"]
+	beforeChunks := vs.findNoteChunks(1)
 	vs.mu.Unlock()
+	if len(beforeChunks) == 0 {
+		t.Fatal("expected note 1 chunks")
+	}
+	noteBefore := beforeChunks[0]
 	if archived, ok := noteBefore.Metadata["archived"].(bool); !ok || archived {
 		t.Errorf("note should have archived=false before archiving, got %v", noteBefore.Metadata["archived"])
 	}
@@ -630,8 +717,12 @@ func TestArchiveEvent_UpdatesNoteMetadata(t *testing.T) {
 
 	// After archive, note should have archived=true
 	vs.mu.Lock()
-	noteAfter := vs.docs["note:1"]
+	afterChunks := vs.findNoteChunks(1)
 	vs.mu.Unlock()
+	if len(afterChunks) == 0 {
+		t.Fatal("expected note 1 chunks after archive")
+	}
+	noteAfter := afterChunks[0]
 	if archived, ok := noteAfter.Metadata["archived"].(bool); !ok || !archived {
 		t.Errorf("note should have archived=true after archiving, got %v", noteAfter.Metadata["archived"])
 	}
@@ -641,8 +732,12 @@ func TestArchiveEvent_UpdatesNoteMetadata(t *testing.T) {
 
 	// After unarchive, note should have archived=false again
 	vs.mu.Lock()
-	noteRestored := vs.docs["note:1"]
+	restoredChunks := vs.findNoteChunks(1)
 	vs.mu.Unlock()
+	if len(restoredChunks) == 0 {
+		t.Fatal("expected note 1 chunks after unarchive")
+	}
+	noteRestored := restoredChunks[0]
 	if archived, ok := noteRestored.Metadata["archived"].(bool); !ok || archived {
 		t.Errorf("note should have archived=false after unarchiving, got %v", noteRestored.Metadata["archived"])
 	}

@@ -39,6 +39,10 @@ func New(db *gorm.DB, modelName string, dims int) (*Store, error) {
 		return nil, err
 	}
 
+	if err := migrateAddChunkIndex(db); err != nil {
+		return nil, err
+	}
+
 	// Only insert metadata if none exists. This preserves existing metadata so the
 	// caller can detect dimension mismatches between the stored model and the current
 	// embedder. Reset() overwrites metadata when the user explicitly reindexes.
@@ -49,20 +53,33 @@ func New(db *gorm.DB, modelName string, dims int) (*Store, error) {
 	return &Store{db: db, dims: dims}, nil
 }
 
+// migrateAddChunkIndex adds the chunk_index column for upgrades from the
+// pre-chunking schema. Idempotent.
+func migrateAddChunkIndex(db *gorm.DB) error {
+	if err := db.Exec(`
+		ALTER TABLE vector_documents
+		ADD COLUMN IF NOT EXISTS chunk_index INTEGER NOT NULL DEFAULT 0
+	`).Error; err != nil {
+		return fmt.Errorf("migrate chunk_index: %w", err)
+	}
+	return nil
+}
+
 func createTables(db *gorm.DB, dims int) error {
 	ddl := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS vector_documents (
-			id         TEXT PRIMARY KEY,
-			text       TEXT NOT NULL,
-			embedding  vector(%d) NOT NULL,
-			doc_type   TEXT,
-			task_id    INTEGER,
-			note_id    INTEGER,
-			state      TEXT,
-			priority   INTEGER,
-			archived   BOOLEAN DEFAULT FALSE,
-			created_at TIMESTAMPTZ DEFAULT NOW(),
-			updated_at TIMESTAMPTZ DEFAULT NOW()
+			id          TEXT PRIMARY KEY,
+			text        TEXT NOT NULL,
+			embedding   vector(%d) NOT NULL,
+			doc_type    TEXT,
+			task_id     INTEGER,
+			note_id     INTEGER,
+			chunk_index INTEGER NOT NULL DEFAULT 0,
+			state       TEXT,
+			priority    INTEGER,
+			archived    BOOLEAN DEFAULT FALSE,
+			created_at  TIMESTAMPTZ DEFAULT NOW(),
+			updated_at  TIMESTAMPTZ DEFAULT NOW()
 		)`, dims)
 	if err := db.Exec(ddl).Error; err != nil {
 		return fmt.Errorf("create vector_documents: %w", err)
@@ -139,19 +156,20 @@ func (s *Store) Upsert(ctx context.Context, docs []vectorstore.Document) error {
 			archived, _ := d.Metadata["archived"].(bool)
 
 			if err := tx.Exec(`
-				INSERT INTO vector_documents (id, text, embedding, doc_type, task_id, note_id, state, priority, archived, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				INSERT INTO vector_documents (id, text, embedding, doc_type, task_id, note_id, chunk_index, state, priority, archived, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 					text = EXCLUDED.text,
 					embedding = EXCLUDED.embedding,
 					doc_type = EXCLUDED.doc_type,
 					task_id = EXCLUDED.task_id,
 					note_id = EXCLUDED.note_id,
+					chunk_index = EXCLUDED.chunk_index,
 					state = EXCLUDED.state,
 					priority = EXCLUDED.priority,
 					archived = EXCLUDED.archived,
 					updated_at = EXCLUDED.updated_at
-			`, d.ID, d.Text, pgv.NewVector(d.Vector), docType, taskID, noteID, state, priority, archived, now, now).Error; err != nil {
+			`, d.ID, d.Text, pgv.NewVector(d.Vector), docType, taskID, noteID, d.ChunkIndex, state, priority, archived, now, now).Error; err != nil {
 				return fmt.Errorf("upsert %q: %w", d.ID, err)
 			}
 		}
@@ -172,6 +190,30 @@ func (s *Store) Delete(ctx context.Context, ids []string) error {
 		"DELETE FROM vector_documents WHERE id IN (?)", ids,
 	).Error; err != nil {
 		return fmt.Errorf("delete: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteTaskDocs(ctx context.Context, taskID uint) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := s.db.WithContext(ctx).Exec(
+		"DELETE FROM vector_documents WHERE doc_type = 'task' AND task_id = ?", taskID,
+	).Error; err != nil {
+		return fmt.Errorf("delete task docs: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteNoteDocs(ctx context.Context, noteID uint) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := s.db.WithContext(ctx).Exec(
+		"DELETE FROM vector_documents WHERE doc_type = 'note' AND note_id = ?", noteID,
+	).Error; err != nil {
+		return fmt.Errorf("delete note docs: %w", err)
 	}
 	return nil
 }
@@ -205,6 +247,10 @@ func (s *Store) Search(ctx context.Context, query []float32, limit int, filter v
 		conditions = append(conditions, "id NOT IN (?)")
 		args = append(args, filter.ExcludeIDs)
 	}
+	if filter.ExcludeTaskID != nil {
+		conditions = append(conditions, "(task_id IS NULL OR task_id <> ?)")
+		args = append(args, *filter.ExcludeTaskID)
+	}
 
 	where := ""
 	if len(conditions) > 0 {
@@ -213,7 +259,7 @@ func (s *Store) Search(ctx context.Context, query []float32, limit int, filter v
 
 	// Cosine similarity: 1 - cosine_distance gives [-1, 1] where 1 = identical.
 	sql := fmt.Sprintf(`
-		SELECT id, text, doc_type, task_id, note_id, state, priority, archived,
+		SELECT id, text, doc_type, task_id, note_id, chunk_index, state, priority, archived,
 		       1 - (embedding <=> ?) AS score
 		FROM vector_documents
 		%s
@@ -227,15 +273,16 @@ func (s *Store) Search(ctx context.Context, query []float32, limit int, filter v
 	finalArgs = append(finalArgs, qv, limit)
 
 	type row struct {
-		ID       string
-		Text     string
-		DocType  *string
-		TaskID   *int
-		NoteID   *int
-		State    *string
-		Priority *int
-		Archived *bool
-		Score    float32
+		ID         string
+		Text       string
+		DocType    *string
+		TaskID     *int
+		NoteID     *int
+		ChunkIndex int
+		State      *string
+		Priority   *int
+		Archived   *bool
+		Score      float32
 	}
 
 	var rows []row
@@ -247,9 +294,10 @@ func (s *Store) Search(ctx context.Context, query []float32, limit int, filter v
 	for i, r := range rows {
 		results[i] = vectorstore.SearchResult{
 			Document: vectorstore.Document{
-				ID:       r.ID,
-				Text:     r.Text,
-				Metadata: buildMeta(r.DocType, r.TaskID, r.NoteID, r.State, r.Priority, r.Archived),
+				ID:         r.ID,
+				Text:       r.Text,
+				Metadata:   buildMeta(r.DocType, r.TaskID, r.NoteID, r.State, r.Priority, r.Archived),
+				ChunkIndex: r.ChunkIndex,
 			},
 			Score: r.Score,
 		}

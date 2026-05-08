@@ -153,10 +153,19 @@ type SemanticSearchOptions struct {
 	IncludeArchived bool   // when false (default), exclude archived items
 }
 
-// SemanticSearchResult is a single result from semantic search.
+// SemanticSearchResult is a single result from semantic search, aggregated
+// across all chunks of one parent doc.
 type SemanticSearchResult struct {
-	ID       string         // e.g., "task:42", "note:17"
-	Text     string         // the embedded text
+	ID       string         // parent doc identifier: "task:42" or "note:17"
+	Text     string         // text of the best-scoring chunk (for back-compat)
 	Metadata map[string]any // task_id, type, etc.
-	Score    float32        // similarity score (higher = more similar)
+	Score    float32        // max similarity score across this doc's matched chunks
+	Chunks   []ChunkMatch   // every matched chunk, sorted by Score desc
+}
+
+// ChunkMatch is one matched chunk within a SemanticSearchResult.
+type ChunkMatch struct {
+	Text       string
+	Score      float32
+	ChunkIndex int
 }

@@ -13,7 +13,7 @@ import (
 
 func registerSemanticTools(srv *server.MCPServer, ss store.SemanticSearcher) {
 	srv.AddTool(mcpgo.NewTool("semantic_search",
-		mcpgo.WithDescription("Semantic search across tasks and notes using vector similarity. Returns ranked results with scores."),
+		mcpgo.WithDescription("Semantic search across tasks and notes using vector similarity. Long descriptions and notes are chunked; each result groups all matching chunks under one parent task or note (Chunks[] is sorted by score, Score is the best chunk's score)."),
 		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Natural language search query"), mcpgo.MaxLength(500)),
 		mcpgo.WithString("type", mcpgo.Description("Filter by type"), mcpgo.Enum("task", "note")),
 		mcpgo.WithNumber("task_id", mcpgo.Description("Filter to a specific task's entities"), mcpgo.Min(1)),
@@ -48,7 +48,7 @@ func registerSemanticTools(srv *server.MCPServer, ss store.SemanticSearcher) {
 	})
 
 	srv.AddTool(mcpgo.NewTool("semantic_search_context",
-		mcpgo.WithDescription("Find tasks and notes semantically related to a given task. Aggregates task text + notes, searches excluding the source task's own documents."),
+		mcpgo.WithDescription("Find tasks and notes semantically related to a given task. Aggregates the source task's text + notes as the query and excludes the source task and its attached notes from results. Each result groups matching chunks under one parent task or note."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID to find related items for"), mcpgo.Min(1)),
 		mcpgo.WithNumber("limit", mcpgo.Description("Max results (default 10, max 100)")),
 		mcpgo.WithString("type", mcpgo.Description("Filter by type"), mcpgo.Enum("task", "note")),

@@ -4,12 +4,22 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/csams/todo/embed"
+	"github.com/csams/todo/embed/chunker"
 	"github.com/csams/todo/model"
 	"github.com/csams/todo/store"
 	"github.com/csams/todo/vectorstore"
+)
+
+// Chunk sizing constants. Targets ~1000 tokens per chunk under a ~3 chars/token
+// heuristic, well below nomic-embed-text's 2048-token training window.
+const (
+	chunkMaxRunes  = 3000
+	chunkOverlap   = 200
+	headerMaxRunes = 1000 // cap header so a pathological tag list can't starve the body budget
 )
 
 // VectorSyncer is a StoreObserver that keeps a VectorStore in sync with the
@@ -69,14 +79,16 @@ func (v *VectorSyncer) syncTasks(ctx context.Context, event store.StoreEvent) er
 		return v.reembedTaskNotes(ctx, event.TaskIDs)
 
 	case "task.deleted":
-		// Delete task and all its notes from vector store
-		var ids []string
+		// Delete all chunks for each task. Note rows for these tasks are not
+		// removed here — note.deleted events handle that path explicitly when
+		// the caller passed delete_notes:true; otherwise notes are orphaned
+		// and stay in the index under their own doc ids.
 		for _, tid := range event.TaskIDs {
-			ids = append(ids, fmt.Sprintf("task:%d", tid))
-			// Also delete associated notes (we don't have note IDs here,
-			// so we use a prefix pattern if supported, or rely on reindex cleanup)
+			if err := v.vs.DeleteTaskDocs(ctx, tid); err != nil {
+				return err
+			}
 		}
-		return v.vs.Delete(ctx, ids)
+		return nil
 
 	default:
 		return v.embedTasks(ctx, event.TaskIDs)
@@ -94,11 +106,12 @@ func (v *VectorSyncer) syncNotes(ctx context.Context, event store.StoreEvent) er
 	case "note.created", "note.updated", "note.archived", "note.unarchived":
 		return v.embedNotes(ctx, event.NoteIDs)
 	case "note.deleted":
-		var ids []string
 		for _, nid := range event.NoteIDs {
-			ids = append(ids, fmt.Sprintf("note:%d", nid))
+			if err := v.vs.DeleteNoteDocs(ctx, nid); err != nil {
+				return err
+			}
 		}
-		return v.vs.Delete(ctx, ids)
+		return nil
 	default:
 		return nil
 	}
@@ -114,19 +127,27 @@ func (v *VectorSyncer) embedTasks(ctx context.Context, taskIDs []uint) error {
 			continue // task may have been deleted
 		}
 		t := detail.Task
-		text := buildTaskEmbedText(t)
-		texts = append(texts, text)
-		docs = append(docs, vectorstore.Document{
-			ID:   fmt.Sprintf("task:%d", t.ID),
-			Text: text,
-			Metadata: map[string]any{
-				"type":     "task",
-				"task_id":  int(t.ID),
-				"state":    string(t.State),
-				"priority": t.Priority,
-				"archived": t.Archived,
-			},
-		})
+		// Replace any prior chunks before re-embedding, so a shrunk description
+		// can't leave stale chunks behind.
+		if err := v.vs.DeleteTaskDocs(ctx, t.ID); err != nil {
+			return err
+		}
+		chunks := buildTaskChunks(t)
+		for _, c := range chunks {
+			texts = append(texts, c.Text)
+			docs = append(docs, vectorstore.Document{
+				ID:         fmt.Sprintf("task:%d:%d", t.ID, c.ChunkIndex),
+				Text:       c.Text,
+				ChunkIndex: c.ChunkIndex,
+				Metadata: map[string]any{
+					"type":     "task",
+					"task_id":  int(t.ID),
+					"state":    string(t.State),
+					"priority": t.Priority,
+					"archived": t.Archived,
+				},
+			})
+		}
 	}
 
 	if len(docs) == 0 {
@@ -160,38 +181,50 @@ func (v *VectorSyncer) embedNotes(ctx context.Context, noteIDs []uint) error {
 		return nil
 	}
 
-	// Cache parent task archived flag for task-attached notes.
-	// Returns (archived, found) — not-found tasks (e.g. orphan with stale task_id
-	// during a race) are treated as standalone for metadata purposes.
-	archivedCache := map[uint]bool{}
+	// Cache parent task (archived + title) for task-attached notes. One GetTask
+	// per parent per batch; not-found tasks (orphan with stale task_id during
+	// a race) are treated as standalone for metadata purposes.
+	type parentInfo struct {
+		archived bool
+		title    string
+	}
+	parentCache := map[uint]parentInfo{}
 	missingCache := map[uint]bool{}
-	getArchived := func(taskID uint) (bool, bool) {
-		if a, ok := archivedCache[taskID]; ok {
-			return a, true
+	getParent := func(taskID uint) (parentInfo, bool) {
+		if p, ok := parentCache[taskID]; ok {
+			return p, true
 		}
 		if missingCache[taskID] {
-			return false, false
+			return parentInfo{}, false
 		}
 		detail, err := v.store.GetTask(ctx, taskID)
 		if err != nil {
 			missingCache[taskID] = true
-			return false, false
+			return parentInfo{}, false
 		}
-		archivedCache[taskID] = detail.Archived
-		return detail.Archived, true
+		p := parentInfo{archived: detail.Archived, title: detail.Title}
+		parentCache[taskID] = p
+		return p, true
 	}
 
 	var docs []vectorstore.Document
 	var texts []string
 	for _, n := range notes {
+		// Replace prior chunks for this note.
+		if err := v.vs.DeleteNoteDocs(ctx, n.ID); err != nil {
+			return err
+		}
+
 		meta := map[string]any{
 			"type":    "note",
 			"note_id": int(n.ID),
 		}
+		var parentTitle string
 		if n.TaskID != nil {
-			if archived, found := getArchived(*n.TaskID); found {
+			if p, found := getParent(*n.TaskID); found {
 				meta["task_id"] = int(*n.TaskID)
-				meta["archived"] = archived
+				meta["archived"] = p.archived
+				parentTitle = p.title
 			} else {
 				// Stale task_id (parent missing); treat as standalone.
 				meta["archived"] = n.Archived
@@ -199,12 +232,26 @@ func (v *VectorSyncer) embedNotes(ctx context.Context, noteIDs []uint) error {
 		} else {
 			meta["archived"] = n.Archived
 		}
-		texts = append(texts, n.Text)
-		docs = append(docs, vectorstore.Document{
-			ID:       fmt.Sprintf("note:%d", n.ID),
-			Text:     n.Text,
-			Metadata: meta,
-		})
+
+		chunks := buildNoteChunks(n, parentTitle)
+		for _, c := range chunks {
+			// Each chunk needs its own metadata copy since Upsert mutates per-doc.
+			cmeta := make(map[string]any, len(meta))
+			for k, v := range meta {
+				cmeta[k] = v
+			}
+			texts = append(texts, c.Text)
+			docs = append(docs, vectorstore.Document{
+				ID:         fmt.Sprintf("note:%d:%d", n.ID, c.ChunkIndex),
+				Text:       c.Text,
+				ChunkIndex: c.ChunkIndex,
+				Metadata:   cmeta,
+			})
+		}
+	}
+
+	if len(docs) == 0 {
+		return nil
 	}
 
 	vecs, err := v.embedder.EmbedBatch(ctx, texts)
@@ -251,21 +298,24 @@ func (v *VectorSyncer) markDirty(_ context.Context, event store.StoreEvent) {
 	)
 }
 
-// buildTaskEmbedText creates the enriched text for task embedding.
-// Caller must populate t.Tags and t.Links if they want them included.
-func buildTaskEmbedText(t model.Task) string {
+// chunkInput is one prepared chunk ready for embedding.
+type chunkInput struct {
+	Text       string
+	ChunkIndex int
+}
+
+// buildTaskHeader builds the metadata header that prefixes each task chunk so
+// mid-description chunks remain self-contained for retrieval.
+func buildTaskHeader(t model.Task) string {
 	var b strings.Builder
+	b.WriteString("Title: ")
 	b.WriteString(t.Title)
-	if t.Description != "" {
-		b.WriteString(". ")
-		b.WriteString(t.Description)
-	}
 	if len(t.Tags) > 0 {
-		b.WriteString(". Tags: ")
 		tags := make([]string, len(t.Tags))
 		for i, tt := range t.Tags {
 			tags[i] = tt.Tag
 		}
+		b.WriteString(". Tags: ")
 		b.WriteString(strings.Join(tags, ", "))
 	}
 	var linkDescs []string
@@ -278,8 +328,74 @@ func buildTaskEmbedText(t model.Task) string {
 		b.WriteString(". Links: ")
 		b.WriteString(strings.Join(linkDescs, "; "))
 	}
-	fmt.Fprintf(&b, ". Priority: %d. State: %s.", t.Priority, t.State)
-	return b.String()
+	fmt.Fprintf(&b, ". Priority: %d. State: %s", t.Priority, t.State)
+
+	header := b.String()
+	if chunker.RuneCount(header) > headerMaxRunes {
+		runes := []rune(header)
+		header = string(runes[:headerMaxRunes-1]) + "…"
+	}
+	return header
+}
+
+// buildTaskChunks emits one or more chunks for a task. Empty descriptions
+// produce a single header-only chunk so every task is searchable.
+func buildTaskChunks(t model.Task) []chunkInput {
+	header := buildTaskHeader(t)
+	headerWithSep := header + ". "
+
+	desc := strings.TrimSpace(t.Description)
+	if desc == "" {
+		return []chunkInput{{Text: header, ChunkIndex: 0}}
+	}
+
+	bodyBudget := chunkMaxRunes - chunker.RuneCount(headerWithSep)
+	if bodyBudget < 100 {
+		// Defensive — header cap should keep us well above this.
+		bodyBudget = 100
+	}
+	bodyChunks := chunker.ChunkText(desc, bodyBudget, chunkOverlap)
+	if len(bodyChunks) == 0 {
+		return []chunkInput{{Text: header, ChunkIndex: 0}}
+	}
+
+	out := make([]chunkInput, len(bodyChunks))
+	for i, body := range bodyChunks {
+		out[i] = chunkInput{Text: headerWithSep + body, ChunkIndex: i}
+	}
+	return out
+}
+
+// buildNoteChunks emits chunks for a note. Notes always have non-empty text
+// (validator enforces this) so we always emit ≥ 1 chunk.
+func buildNoteChunks(n model.Note, parentTitle string) []chunkInput {
+	var header string
+	if parentTitle != "" {
+		header = "Note for: " + parentTitle
+		if chunker.RuneCount(header) > headerMaxRunes {
+			runes := []rune(header)
+			header = string(runes[:headerMaxRunes-1]) + "…"
+		}
+	} else {
+		header = "Note"
+	}
+	headerWithSep := header + ". "
+
+	bodyBudget := chunkMaxRunes - chunker.RuneCount(headerWithSep)
+	if bodyBudget < 100 {
+		bodyBudget = 100
+	}
+	bodyChunks := chunker.ChunkText(n.Text, bodyBudget, chunkOverlap)
+	if len(bodyChunks) == 0 {
+		// Validator forbids empty notes; this path is defensive.
+		return []chunkInput{{Text: headerWithSep + n.Text, ChunkIndex: 0}}
+	}
+
+	out := make([]chunkInput, len(bodyChunks))
+	for i, body := range bodyChunks {
+		out[i] = chunkInput{Text: headerWithSep + body, ChunkIndex: i}
+	}
+	return out
 }
 
 // --- SemanticSearcher implementation ---
@@ -307,12 +423,13 @@ func (v *VectorSyncer) SemanticSearch(ctx context.Context, query string, opts st
 		filter.Archived = &f
 	}
 
-	results, err := v.vs.Search(ctx, vec, limit, filter)
+	// Over-fetch chunks so per-doc aggregation has enough coverage to fill `limit` docs.
+	results, err := v.vs.Search(ctx, vec, expandedLimit(limit), filter)
 	if err != nil {
 		return nil, err
 	}
 
-	return toSemanticResults(results), nil
+	return aggregateByDoc(results, limit), nil
 }
 
 func (v *VectorSyncer) SemanticSearchContext(ctx context.Context, taskID uint, opts store.SemanticSearchOptions) ([]store.SemanticSearchResult, error) {
@@ -349,14 +466,11 @@ func (v *VectorSyncer) SemanticSearchContext(ctx context.Context, taskID uint, o
 		limit = 10
 	}
 
-	// Exclude the source task's own documents
-	excludeIDs := []string{fmt.Sprintf("task:%d", taskID)}
-	for _, n := range detail.Notes {
-		excludeIDs = append(excludeIDs, fmt.Sprintf("note:%d", n.ID))
-	}
-
+	// Exclude every chunk whose task_id matches the source task. This covers the
+	// task's own chunks and its attached-note chunks (notes carry task_id metadata).
+	tid := taskID
 	filter := vectorstore.SearchFilter{
-		ExcludeIDs: excludeIDs,
+		ExcludeTaskID: &tid,
 	}
 	if opts.Type != "" {
 		filter.Type = &opts.Type
@@ -366,17 +480,97 @@ func (v *VectorSyncer) SemanticSearchContext(ctx context.Context, taskID uint, o
 		filter.Archived = &f
 	}
 
-	results, err := v.vs.Search(ctx, vec, limit+len(excludeIDs), filter)
+	results, err := v.vs.Search(ctx, vec, expandedLimit(limit), filter)
 	if err != nil {
 		return nil, err
 	}
 
-	// Trim to requested limit (we over-fetched to account for exclusions done server-side)
-	if len(results) > limit {
-		results = results[:limit]
+	return aggregateByDoc(results, limit), nil
+}
+
+// expandedLimit returns the chunk-level fetch size used to ensure per-doc
+// aggregation has enough material to fill `limit` distinct docs.
+func expandedLimit(limit int) int {
+	n := limit * 5
+	if n > 500 {
+		n = 500
+	}
+	if n < limit {
+		n = limit
+	}
+	return n
+}
+
+// aggregateByDoc groups chunk-level results by parent doc, then returns at most
+// `limit` results sorted by best-chunk score.
+func aggregateByDoc(results []vectorstore.SearchResult, limit int) []store.SemanticSearchResult {
+	type bucket struct {
+		out *store.SemanticSearchResult
+	}
+	buckets := make(map[string]*bucket)
+	order := make([]string, 0)
+
+	for _, r := range results {
+		parentID := parentDocID(r)
+		b, ok := buckets[parentID]
+		if !ok {
+			res := store.SemanticSearchResult{
+				ID:       parentID,
+				Text:     r.Text,
+				Metadata: r.Metadata,
+				Score:    r.Score,
+			}
+			b = &bucket{out: &res}
+			buckets[parentID] = b
+			order = append(order, parentID)
+		} else if r.Score > b.out.Score {
+			b.out.Score = r.Score
+			b.out.Text = r.Text
+			b.out.Metadata = r.Metadata
+		}
+		b.out.Chunks = append(b.out.Chunks, store.ChunkMatch{
+			Text:       r.Text,
+			Score:      r.Score,
+			ChunkIndex: r.ChunkIndex,
+		})
 	}
 
-	return toSemanticResults(results), nil
+	out := make([]store.SemanticSearchResult, 0, len(order))
+	for _, id := range order {
+		res := buckets[id].out
+		sort.Slice(res.Chunks, func(i, j int) bool {
+			return res.Chunks[i].Score > res.Chunks[j].Score
+		})
+		out = append(out, *res)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Score > out[j].Score
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// parentDocID returns the doc-level identifier ("task:42", "note:17") derived
+// from chunk metadata.
+func parentDocID(r vectorstore.SearchResult) string {
+	docType, _ := r.Metadata["type"].(string)
+	switch docType {
+	case "task":
+		if tid, ok := r.Metadata["task_id"].(int); ok {
+			return fmt.Sprintf("task:%d", tid)
+		}
+	case "note":
+		if nid, ok := r.Metadata["note_id"].(int); ok {
+			return fmt.Sprintf("note:%d", nid)
+		}
+	}
+	// Fallback: strip the trailing :chunkIndex from the row id, if present.
+	if idx := strings.LastIndex(r.ID, ":"); idx > 0 {
+		return r.ID[:idx]
+	}
+	return r.ID
 }
 
 // Reindex re-embeds all tasks and notes from the relational store into the vector store.
@@ -396,10 +590,14 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		return fmt.Errorf("listing tasks: %w", err)
 	}
 
-	// Build task archived lookup
+	// Build per-task lookups used during note embedding (archived flag for
+	// metadata, title for chunk headers). One pass over tasks instead of
+	// re-fetching per batch.
 	taskArchived := make(map[uint]bool, len(tasks))
+	taskTitle := make(map[uint]string, len(tasks))
 	for _, t := range tasks {
 		taskArchived[t.ID] = t.Archived
+		taskTitle[t.ID] = t.Title
 	}
 
 	// Fetch all notes (attached + standalone).
@@ -428,19 +626,37 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 			if links, err := v.store.ListLinks(ctx, t.ID); err == nil {
 				t.Links = links
 			}
-			text := buildTaskEmbedText(t)
-			texts = append(texts, text)
-			docs = append(docs, vectorstore.Document{
-				ID:   fmt.Sprintf("task:%d", t.ID),
-				Text: text,
-				Metadata: map[string]any{
-					"type":     "task",
-					"task_id":  int(t.ID),
-					"state":    string(t.State),
-					"priority": t.Priority,
-					"archived": t.Archived,
-				},
-			})
+			// Without --clear we still need to drop any stale chunks from a prior
+			// indexing; chunk counts may have shrunk.
+			if !clear {
+				if err := v.vs.DeleteTaskDocs(ctx, t.ID); err != nil {
+					return fmt.Errorf("deleting prior task chunks: %w", err)
+				}
+			}
+			chunks := buildTaskChunks(t)
+			for _, c := range chunks {
+				texts = append(texts, c.Text)
+				docs = append(docs, vectorstore.Document{
+					ID:         fmt.Sprintf("task:%d:%d", t.ID, c.ChunkIndex),
+					Text:       c.Text,
+					ChunkIndex: c.ChunkIndex,
+					Metadata: map[string]any{
+						"type":     "task",
+						"task_id":  int(t.ID),
+						"state":    string(t.State),
+						"priority": t.Priority,
+						"archived": t.Archived,
+					},
+				})
+			}
+		}
+
+		if len(docs) == 0 {
+			done += len(batch)
+			if progressFn != nil {
+				progressFn(done, total)
+			}
+			continue
 		}
 
 		vecs, err := v.embedder.EmbedBatch(ctx, texts)
@@ -473,15 +689,23 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 
 		var docs []vectorstore.Document
 		var texts []string
+
 		for _, n := range batch {
+			if !clear {
+				if err := v.vs.DeleteNoteDocs(ctx, n.ID); err != nil {
+					return fmt.Errorf("deleting prior note chunks: %w", err)
+				}
+			}
 			meta := map[string]any{
 				"type":    "note",
 				"note_id": int(n.ID),
 			}
+			var parentTitle string
 			if n.TaskID != nil {
 				meta["task_id"] = int(*n.TaskID)
 				if a, ok := taskArchived[*n.TaskID]; ok {
 					meta["archived"] = a
+					parentTitle = taskTitle[*n.TaskID]
 				} else {
 					// Orphan with stale task_id; treat as standalone.
 					meta["archived"] = n.Archived
@@ -489,12 +713,29 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 			} else {
 				meta["archived"] = n.Archived
 			}
-			texts = append(texts, n.Text)
-			docs = append(docs, vectorstore.Document{
-				ID:       fmt.Sprintf("note:%d", n.ID),
-				Text:     n.Text,
-				Metadata: meta,
-			})
+
+			chunks := buildNoteChunks(n, parentTitle)
+			for _, c := range chunks {
+				cmeta := make(map[string]any, len(meta))
+				for k, v := range meta {
+					cmeta[k] = v
+				}
+				texts = append(texts, c.Text)
+				docs = append(docs, vectorstore.Document{
+					ID:         fmt.Sprintf("note:%d:%d", n.ID, c.ChunkIndex),
+					Text:       c.Text,
+					ChunkIndex: c.ChunkIndex,
+					Metadata:   cmeta,
+				})
+			}
+		}
+
+		if len(docs) == 0 {
+			done += len(batch)
+			if progressFn != nil {
+				progressFn(done, total)
+			}
+			continue
 		}
 
 		vecs, err := v.embedder.EmbedBatch(ctx, texts)
@@ -518,19 +759,6 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 	}
 
 	return nil
-}
-
-func toSemanticResults(results []vectorstore.SearchResult) []store.SemanticSearchResult {
-	out := make([]store.SemanticSearchResult, len(results))
-	for i, r := range results {
-		out[i] = store.SemanticSearchResult{
-			ID:       r.ID,
-			Text:     r.Text,
-			Metadata: r.Metadata,
-			Score:    r.Score,
-		}
-	}
-	return out
 }
 
 // Compile-time interface checks.
