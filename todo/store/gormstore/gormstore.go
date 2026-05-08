@@ -35,6 +35,9 @@ type GormStore struct {
 
 // New creates a GormStore, runs migrations, and returns it.
 func New(db *gorm.DB) (*GormStore, error) {
+	if err := migrateNotesTaskIDNullable(db); err != nil {
+		return nil, fmt.Errorf("notes nullable migration: %w", err)
+	}
 	if err := db.AutoMigrate(
 		&model.Task{},
 		&model.TaskBlocker{},
@@ -45,6 +48,105 @@ func New(db *gorm.DB) (*GormStore, error) {
 		return nil, fmt.Errorf("automigrate: %w", err)
 	}
 	return &GormStore{db: db, source: "cli"}, nil
+}
+
+// migrateNotesTaskIDNullable drops the NOT NULL constraint from notes.task_id.
+// AutoMigrate does not change column nullability, so we handle it explicitly.
+// No-op if the notes table doesn't exist yet (fresh DB) or if task_id is already nullable.
+func migrateNotesTaskIDNullable(db *gorm.DB) error {
+	if !db.Migrator().HasTable(&model.Note{}) {
+		return nil
+	}
+	switch db.Dialector.Name() {
+	case "postgres":
+		var isNullable string
+		row := db.Raw(
+			"SELECT is_nullable FROM information_schema.columns WHERE table_name = 'notes' AND column_name = 'task_id'",
+		).Row()
+		if err := row.Scan(&isNullable); err != nil {
+			return fmt.Errorf("postgres column lookup: %w", err)
+		}
+		if isNullable == "NO" {
+			if err := db.Exec("ALTER TABLE notes ALTER COLUMN task_id DROP NOT NULL").Error; err != nil {
+				return fmt.Errorf("postgres drop not null: %w", err)
+			}
+		}
+	case "sqlite":
+		// PRAGMA table_info returns columns: cid, name, type, notnull, dflt_value, pk.
+		// Tags map to those exact column names (case-insensitive).
+		type sqliteCol struct {
+			CID     int     `gorm:"column:cid"`
+			Name    string  `gorm:"column:name"`
+			Type    string  `gorm:"column:type"`
+			NotNull int     `gorm:"column:notnull"`
+			Dflt    *string `gorm:"column:dflt_value"`
+			PK      int     `gorm:"column:pk"`
+		}
+		var cols []sqliteCol
+		if err := db.Raw("PRAGMA table_info(notes)").Scan(&cols).Error; err != nil {
+			return fmt.Errorf("sqlite table_info: %w", err)
+		}
+		var taskIDNotNull, hasVectorDirty bool
+		for _, c := range cols {
+			if c.Name == "task_id" && c.NotNull == 1 {
+				taskIDNotNull = true
+			}
+			if c.Name == "vector_dirty" {
+				hasVectorDirty = true
+			}
+		}
+		if !taskIDNotNull {
+			return nil
+		}
+		// 12-step ALTER: rebuild table without NOT NULL on task_id. Only legacy columns
+		// are copied; AutoMigrate adds archived/updated_at after this step.
+		// PRAGMA foreign_keys can only change outside a transaction, so toggle it around
+		// the rebuild and run the schema changes inside db.Transaction so partial failures
+		// roll back cleanly.
+		if err := db.Exec("PRAGMA foreign_keys=OFF").Error; err != nil {
+			return fmt.Errorf("sqlite pragma off: %w", err)
+		}
+		txErr := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(`CREATE TABLE notes_new (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				task_id INTEGER,
+				text TEXT NOT NULL,
+				vector_dirty INTEGER NOT NULL DEFAULT 0,
+				created_at DATETIME
+			)`).Error; err != nil {
+				return fmt.Errorf("create notes_new: %w", err)
+			}
+			var copyStmt string
+			if hasVectorDirty {
+				copyStmt = `INSERT INTO notes_new (id, task_id, text, vector_dirty, created_at)
+					SELECT id, task_id, text, COALESCE(vector_dirty, 0), created_at FROM notes`
+			} else {
+				copyStmt = `INSERT INTO notes_new (id, task_id, text, created_at)
+					SELECT id, task_id, text, created_at FROM notes`
+			}
+			if err := tx.Exec(copyStmt).Error; err != nil {
+				return fmt.Errorf("copy rows: %w", err)
+			}
+			if err := tx.Exec("DROP TABLE notes").Error; err != nil {
+				return fmt.Errorf("drop old: %w", err)
+			}
+			if err := tx.Exec("ALTER TABLE notes_new RENAME TO notes").Error; err != nil {
+				return fmt.Errorf("rename: %w", err)
+			}
+			if err := tx.Exec("CREATE INDEX idx_notes_task_id ON notes(task_id)").Error; err != nil {
+				return fmt.Errorf("recreate index: %w", err)
+			}
+			return nil
+		})
+		// Always restore FK enforcement, even on rebuild failure.
+		if pragmaErr := db.Exec("PRAGMA foreign_keys=ON").Error; pragmaErr != nil && txErr == nil {
+			return fmt.Errorf("sqlite pragma on: %w", pragmaErr)
+		}
+		if txErr != nil {
+			return fmt.Errorf("sqlite rebuild: %w", txErr)
+		}
+	}
+	return nil
 }
 
 // SetSource sets the source identifier for audit events.
@@ -1104,20 +1206,21 @@ func (s *GormStore) ArchiveTask(ctx context.Context, id uint, archived bool) err
 	return nil
 }
 
-func (s *GormStore) DeleteTask(ctx context.Context, id uint, recursive bool) error {
+func (s *GormStore) DeleteTask(ctx context.Context, id uint, opts store.DeleteTaskOptions) error {
 	if err := validateID(id); err != nil {
 		return err
 	}
 
 	db := s.db.WithContext(ctx)
 	var deletedIDs []uint
+	var orphanedNoteIDs, deletedNoteIDs []uint
 
 	err := db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExists(tx, id); err != nil {
 			return err
 		}
 
-		if recursive {
+		if opts.Recursive {
 			subtreeIDs, err := s.collectSubtreeIDs(tx, id)
 			if err != nil {
 				return err
@@ -1130,9 +1233,12 @@ func (s *GormStore) DeleteTask(ctx context.Context, id uint, recursive bool) err
 
 			// Delete all related data for the subtree
 			for _, tid := range subtreeIDs {
-				if err := s.deleteTaskData(tx, tid); err != nil {
+				orphaned, deleted, err := s.deleteTaskData(tx, tid, opts.DeleteNotes)
+				if err != nil {
 					return err
 				}
+				orphanedNoteIDs = append(orphanedNoteIDs, orphaned...)
+				deletedNoteIDs = append(deletedNoteIDs, deleted...)
 			}
 
 			deletedIDs = subtreeIDs
@@ -1156,9 +1262,12 @@ func (s *GormStore) DeleteTask(ctx context.Context, id uint, recursive bool) err
 		}
 
 		// Delete task data
-		if err := s.deleteTaskData(tx, id); err != nil {
+		orphaned, deleted, err := s.deleteTaskData(tx, id, opts.DeleteNotes)
+		if err != nil {
 			return err
 		}
+		orphanedNoteIDs = orphaned
+		deletedNoteIDs = deleted
 
 		if err := tx.Delete(&model.Task{}, id).Error; err != nil {
 			return err
@@ -1185,6 +1294,21 @@ func (s *GormStore) DeleteTask(ctx context.Context, id uint, recursive bool) err
 		return err
 	}
 
+	// Emit after commit.
+	if len(orphanedNoteIDs) > 0 {
+		s.emit(ctx, store.StoreEvent{
+			Type:    "note.updated",
+			TaskIDs: deletedIDs,
+			NoteIDs: orphanedNoteIDs,
+		})
+	}
+	if len(deletedNoteIDs) > 0 {
+		s.emit(ctx, store.StoreEvent{
+			Type:    "note.deleted",
+			TaskIDs: deletedIDs,
+			NoteIDs: deletedNoteIDs,
+		})
+	}
 	s.emit(ctx, store.StoreEvent{
 		Type:    "task.deleted",
 		TaskIDs: deletedIDs,
@@ -1193,21 +1317,46 @@ func (s *GormStore) DeleteTask(ctx context.Context, id uint, recursive bool) err
 	return nil
 }
 
-// deleteTaskData removes all associated data for a single task (not the task itself).
-func (s *GormStore) deleteTaskData(tx *gorm.DB, taskID uint) error {
-	if err := tx.Where("task_id = ?", taskID).Delete(&model.Note{}).Error; err != nil {
-		return err
+// deleteTaskData removes tags/links/blockers for a task and either orphans (default)
+// or hard-deletes its notes. Returns the note IDs that were orphaned and the note IDs
+// that were hard-deleted; the caller emits events after the surrounding transaction commits.
+func (s *GormStore) deleteTaskData(tx *gorm.DB, taskID uint, deleteNotes bool) ([]uint, []uint, error) {
+	var orphanedNoteIDs, deletedNoteIDs []uint
+
+	// Collect note IDs first so the caller can emit events after commit.
+	var noteIDs []uint
+	if err := tx.Model(&model.Note{}).Where("task_id = ?", taskID).Pluck("id", &noteIDs).Error; err != nil {
+		return nil, nil, err
 	}
+
+	if deleteNotes {
+		if len(noteIDs) > 0 {
+			if err := tx.Where("id IN ?", noteIDs).Delete(&model.Note{}).Error; err != nil {
+				return nil, nil, err
+			}
+			deletedNoteIDs = noteIDs
+		}
+	} else {
+		if len(noteIDs) > 0 {
+			// Set task_id = NULL via a map so GORM emits the SQL we want.
+			if err := tx.Model(&model.Note{}).Where("id IN ?", noteIDs).
+				Updates(map[string]any{"task_id": nil}).Error; err != nil {
+				return nil, nil, err
+			}
+			orphanedNoteIDs = noteIDs
+		}
+	}
+
 	if err := tx.Where("task_id = ?", taskID).Delete(&model.Link{}).Error; err != nil {
-		return err
+		return nil, nil, err
 	}
 	if err := tx.Where("task_id = ?", taskID).Delete(&model.TaskTag{}).Error; err != nil {
-		return err
+		return nil, nil, err
 	}
 	if err := tx.Where("task_id = ? OR blocker_id = ?", taskID, taskID).Delete(&model.TaskBlocker{}).Error; err != nil {
-		return err
+		return nil, nil, err
 	}
-	return nil
+	return orphanedNoteIDs, deletedNoteIDs, nil
 }
 
 // --- Search ---
@@ -1679,8 +1828,15 @@ func (s *GormStore) DeleteLink(ctx context.Context, taskID uint, linkID uint) er
 
 // --- Notes ---
 
-func (s *GormStore) AddNote(ctx context.Context, taskID uint, text string) (*model.Note, error) {
-	if err := validateID(taskID); err != nil {
+func validateOptionalTaskID(taskID *uint) error {
+	if taskID == nil {
+		return nil
+	}
+	return validateID(*taskID)
+}
+
+func (s *GormStore) AddNote(ctx context.Context, taskID *uint, text string) (*model.Note, error) {
+	if err := validateOptionalTaskID(taskID); err != nil {
 		return nil, err
 	}
 	var err error
@@ -1691,8 +1847,10 @@ func (s *GormStore) AddNote(ctx context.Context, taskID uint, text string) (*mod
 	db := s.db.WithContext(ctx)
 	note := model.Note{TaskID: taskID, Text: text}
 	err = db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.taskExistsActive(tx, taskID); err != nil {
-			return err
+		if taskID != nil {
+			if _, err := s.taskExistsActive(tx, *taskID); err != nil {
+				return err
+			}
 		}
 		return tx.Create(&note).Error
 	})
@@ -1700,86 +1858,193 @@ func (s *GormStore) AddNote(ctx context.Context, taskID uint, text string) (*mod
 		return nil, err
 	}
 
-	s.emit(ctx, store.StoreEvent{
+	event := store.StoreEvent{
 		Type:    "note.created",
-		TaskIDs: []uint{taskID},
 		NoteIDs: []uint{note.ID},
-	})
+	}
+	if taskID != nil {
+		event.TaskIDs = []uint{*taskID}
+	}
+	s.emit(ctx, event)
 
 	return &note, nil
 }
 
-func (s *GormStore) UpdateNote(ctx context.Context, taskID uint, noteID uint, text string) (*model.Note, error) {
-	if err := validateID(taskID); err != nil {
-		return nil, err
-	}
+func (s *GormStore) UpdateNote(ctx context.Context, noteID uint, opts store.UpdateNoteOptions) (*model.Note, error) {
 	if err := validateID(noteID); err != nil {
 		return nil, err
 	}
-	var err error
-	if text, err = validateNoteText(text); err != nil {
-		return nil, err
+	if opts.Text == nil && !opts.SetTaskID && opts.Archived == nil {
+		return nil, &model.ValidationError{Field: "opts", Message: "at least one of text, task_id, archived must be provided"}
+	}
+
+	var cleanText string
+	if opts.Text != nil {
+		var err error
+		if cleanText, err = validateNoteText(*opts.Text); err != nil {
+			return nil, err
+		}
+	}
+	if opts.SetTaskID && opts.TaskID != nil {
+		if err := validateID(*opts.TaskID); err != nil {
+			return nil, err
+		}
 	}
 
 	db := s.db.WithContext(ctx)
 	var note model.Note
-	err = db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.taskExistsActive(tx, taskID); err != nil {
-			return err
-		}
-		if err := tx.Where("id = ? AND task_id = ?", noteID, taskID).First(&note).Error; err != nil {
+	var oldTaskID *uint
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&note, noteID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("note %d for task %d: %w", noteID, taskID, model.ErrNotFound)
+				return fmt.Errorf("note %d: %w", noteID, model.ErrNotFound)
 			}
 			return err
 		}
-		return tx.Model(&note).Update("text", text).Error
+		oldTaskID = note.TaskID
+
+		updates := map[string]any{}
+		if opts.Text != nil {
+			updates["text"] = cleanText
+		}
+		if opts.SetTaskID {
+			if opts.TaskID != nil {
+				if _, err := s.taskExistsActive(tx, *opts.TaskID); err != nil {
+					return err
+				}
+			}
+			updates["task_id"] = opts.TaskID
+		}
+		if opts.Archived != nil {
+			updates["archived"] = *opts.Archived
+		}
+
+		if err := tx.Model(&note).Updates(updates).Error; err != nil {
+			return err
+		}
+		// Reload to capture updated_at and any other side effects.
+		return tx.First(&note, noteID).Error
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	s.emit(ctx, store.StoreEvent{
+	event := store.StoreEvent{
 		Type:    "note.updated",
-		TaskIDs: []uint{taskID},
 		NoteIDs: []uint{noteID},
-	})
+	}
+	taskIDSet := map[uint]struct{}{}
+	if oldTaskID != nil {
+		taskIDSet[*oldTaskID] = struct{}{}
+	}
+	if note.TaskID != nil {
+		taskIDSet[*note.TaskID] = struct{}{}
+	}
+	for tid := range taskIDSet {
+		event.TaskIDs = append(event.TaskIDs, tid)
+	}
+	s.emit(ctx, event)
 
 	return &note, nil
 }
 
-func (s *GormStore) ListNotes(ctx context.Context, taskID uint) ([]model.Note, error) {
-	if err := validateID(taskID); err != nil {
+func (s *GormStore) ListNotes(ctx context.Context, taskID *uint) ([]model.Note, error) {
+	if err := validateOptionalTaskID(taskID); err != nil {
 		return nil, err
 	}
 	db := s.db.WithContext(ctx)
 	var notes []model.Note
-	err := db.Where("task_id = ?", taskID).Order("created_at ASC").Find(&notes).Error
+	q := db.Model(&model.Note{})
+	if taskID == nil {
+		q = q.Where("task_id IS NULL")
+	} else {
+		q = q.Where("task_id = ?", *taskID)
+	}
+	err := q.Order("created_at ASC").Find(&notes).Error
 	return notes, err
 }
 
-func (s *GormStore) DeleteNote(ctx context.Context, taskID uint, noteID uint) error {
-	if err := validateID(taskID); err != nil {
-		return err
+func (s *GormStore) ListAllNotes(ctx context.Context) ([]model.Note, error) {
+	db := s.db.WithContext(ctx)
+	var notes []model.Note
+	err := db.Order("created_at ASC").Find(&notes).Error
+	return notes, err
+}
+
+func (s *GormStore) GetNotesByIDs(ctx context.Context, ids []uint) ([]model.Note, error) {
+	if len(ids) == 0 {
+		return nil, nil
 	}
+	db := s.db.WithContext(ctx)
+	var notes []model.Note
+	err := db.Where("id IN ?", ids).Find(&notes).Error
+	return notes, err
+}
+
+func (s *GormStore) DeleteNote(ctx context.Context, noteID uint) error {
 	if err := validateID(noteID); err != nil {
 		return err
 	}
 
 	db := s.db.WithContext(ctx)
-	result := db.Where("id = ? AND task_id = ?", noteID, taskID).Delete(&model.Note{})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("note %d for task %d: %w", noteID, taskID, model.ErrNotFound)
+	var note model.Note
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&note, noteID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("note %d: %w", noteID, model.ErrNotFound)
+			}
+			return err
+		}
+		return tx.Delete(&model.Note{}, noteID).Error
+	})
+	if err != nil {
+		return err
 	}
 
-	s.emit(ctx, store.StoreEvent{
+	event := store.StoreEvent{
 		Type:    "note.deleted",
-		TaskIDs: []uint{taskID},
 		NoteIDs: []uint{noteID},
+	}
+	if note.TaskID != nil {
+		event.TaskIDs = []uint{*note.TaskID}
+	}
+	s.emit(ctx, event)
+
+	return nil
+}
+
+func (s *GormStore) ArchiveNote(ctx context.Context, noteID uint, archived bool) error {
+	if err := validateID(noteID); err != nil {
+		return err
+	}
+
+	db := s.db.WithContext(ctx)
+	var note model.Note
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&note, noteID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("note %d: %w", noteID, model.ErrNotFound)
+			}
+			return err
+		}
+		return tx.Model(&note).Update("archived", archived).Error
 	})
+	if err != nil {
+		return err
+	}
+
+	eventType := "note.archived"
+	if !archived {
+		eventType = "note.unarchived"
+	}
+	event := store.StoreEvent{
+		Type:    eventType,
+		NoteIDs: []uint{noteID},
+	}
+	if note.TaskID != nil {
+		event.TaskIDs = []uint{*note.TaskID}
+	}
+	s.emit(ctx, event)
 
 	return nil
 }

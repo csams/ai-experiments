@@ -157,7 +157,7 @@ func TestDeleteTask_PromotesSubtasks(t *testing.T) {
 	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
 	s.SetParent(ctx(), child.ID, &parent.ID)
 
-	if err := s.DeleteTask(ctx(), parent.ID, false); err != nil {
+	if err := s.DeleteTask(ctx(), parent.ID, store.DeleteTaskOptions{}); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
@@ -175,7 +175,7 @@ func TestDeleteTask_Recursive(t *testing.T) {
 	s.SetParent(ctx(), child.ID, &parent.ID)
 	s.SetParent(ctx(), grandchild.ID, &child.ID)
 
-	if err := s.DeleteTask(ctx(), parent.ID, true); err != nil {
+	if err := s.DeleteTask(ctx(), parent.ID, store.DeleteTaskOptions{Recursive: true}); err != nil {
 		t.Fatalf("recursive delete: %v", err)
 	}
 
@@ -195,7 +195,7 @@ func TestDeleteTask_RecursiveBlocksExternal(t *testing.T) {
 	s.SetParent(ctx(), child.ID, &parent.ID)
 	s.AddBlockers(ctx(), external.ID, []uint{child.ID}) // child blocks external
 
-	err := s.DeleteTask(ctx(), parent.ID, true)
+	err := s.DeleteTask(ctx(), parent.ID, store.DeleteTaskOptions{Recursive: true})
 	if err == nil {
 		t.Fatal("expected error: child blocks external task")
 	}
@@ -215,7 +215,7 @@ func TestDeleteTask_RecursiveBlocksWithinSetOK(t *testing.T) {
 	s.AddBlockers(ctx(), child2.ID, []uint{child1.ID}) // child1 blocks child2 (both in set)
 
 	// Should succeed since both are in the deletion set
-	if err := s.DeleteTask(ctx(), parent.ID, true); err != nil {
+	if err := s.DeleteTask(ctx(), parent.ID, store.DeleteTaskOptions{Recursive: true}); err != nil {
 		t.Fatalf("recursive delete should succeed: %v", err)
 	}
 }

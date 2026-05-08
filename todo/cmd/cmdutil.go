@@ -174,7 +174,15 @@ func outputNotes(notes []model.Note) {
 		return
 	}
 	for _, n := range notes {
-		fmt.Printf("#%d (task %d, %s): %s\n", n.ID, n.TaskID, n.CreatedAt.Format("2006-01-02"), n.Text)
+		parent := "standalone"
+		if n.TaskID != nil {
+			parent = fmt.Sprintf("task %d", *n.TaskID)
+		}
+		archived := ""
+		if n.Archived {
+			archived = " [archived]"
+		}
+		fmt.Printf("#%d (%s, %s)%s: %s\n", n.ID, parent, n.CreatedAt.Format("2006-01-02"), archived, n.Text)
 	}
 }
 

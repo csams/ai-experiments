@@ -71,7 +71,7 @@ func TestGetTask_WithDetails(t *testing.T) {
 	s := newTestStore(t)
 
 	task, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, []string{"tag1"})
-	s.AddNote(ctx(), task.ID, "a note")
+	s.AddNote(ctx(), &task.ID, "a note")
 	s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-123", "")
 
 	detail, err := s.GetTask(ctx(), task.ID)
@@ -213,10 +213,12 @@ func TestListTasks_FilterByTags(t *testing.T) {
 func TestDeleteTask_CascadesNotesLinksTagsBlockers(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, []string{"tag1"})
-	s.AddNote(ctx(), task.ID, "note")
+	s.AddNote(ctx(), &task.ID, "note")
 	s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com", "")
 
-	if err := s.DeleteTask(ctx(), task.ID, false); err != nil {
+	// Default: orphan notes, hard-delete links/tags. Use DeleteNotes:true here to
+	// preserve the original assertion (full cascade).
+	if err := s.DeleteTask(ctx(), task.ID, store.DeleteTaskOptions{DeleteNotes: true}); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
@@ -233,16 +235,20 @@ func TestNotes_CRUD(t *testing.T) {
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
 
 	// Add
-	note, err := s.AddNote(ctx(), task.ID, "first note")
+	note, err := s.AddNote(ctx(), &task.ID, "first note")
 	if err != nil {
 		t.Fatalf("add note: %v", err)
 	}
 	if note.ID == 0 || note.Text != "first note" {
 		t.Errorf("unexpected note: %+v", note)
 	}
+	if note.TaskID == nil || *note.TaskID != task.ID {
+		t.Errorf("note.TaskID = %v, want %d", note.TaskID, task.ID)
+	}
 
 	// Update
-	updated, err := s.UpdateNote(ctx(), task.ID, note.ID, "updated note")
+	newText := "updated note"
+	updated, err := s.UpdateNote(ctx(), note.ID, store.UpdateNoteOptions{Text: &newText})
 	if err != nil {
 		t.Fatalf("update note: %v", err)
 	}
@@ -251,7 +257,7 @@ func TestNotes_CRUD(t *testing.T) {
 	}
 
 	// List
-	notes, err := s.ListNotes(ctx(), task.ID)
+	notes, err := s.ListNotes(ctx(), &task.ID)
 	if err != nil {
 		t.Fatalf("list notes: %v", err)
 	}
@@ -260,22 +266,18 @@ func TestNotes_CRUD(t *testing.T) {
 	}
 
 	// Delete
-	if err := s.DeleteNote(ctx(), task.ID, note.ID); err != nil {
+	if err := s.DeleteNote(ctx(), note.ID); err != nil {
 		t.Fatalf("delete note: %v", err)
 	}
-	notes, _ = s.ListNotes(ctx(), task.ID)
+	notes, _ = s.ListNotes(ctx(), &task.ID)
 	if len(notes) != 0 {
 		t.Errorf("notes after delete = %d, want 0", len(notes))
 	}
 }
 
-func TestDeleteNote_WrongTask(t *testing.T) {
+func TestDeleteNote_NotFound(t *testing.T) {
 	s := newTestStore(t)
-	t1, _ := s.CreateTask(ctx(), "T1", "", 0, nil, nil)
-	t2, _ := s.CreateTask(ctx(), "T2", "", 0, nil, nil)
-	note, _ := s.AddNote(ctx(), t1.ID, "note for t1")
-
-	err := s.DeleteNote(ctx(), t2.ID, note.ID)
+	err := s.DeleteNote(ctx(), 9999)
 	if !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -539,8 +541,8 @@ func TestListTasks_Pagination(t *testing.T) {
 func TestSearchNotes(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
-	s.AddNote(ctx(), task.ID, "checked auth token expiry")
-	s.AddNote(ctx(), task.ID, "unrelated note")
+	s.AddNote(ctx(), &task.ID, "checked auth token expiry")
+	s.AddNote(ctx(), &task.ID, "unrelated note")
 
 	results, err := s.SearchNotes(ctx(), "auth")
 	if err != nil {

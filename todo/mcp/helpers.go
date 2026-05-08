@@ -161,6 +161,18 @@ func getOptInt(req mcpgo.CallToolRequest, key string) *int {
 	return nil
 }
 
+// getOptUint extracts a *uint argument, returns nil if missing, non-numeric, or < 1.
+// This treats the schema's Min(1) as defense-in-depth; callers can rely on the
+// returned pointer always referring to a positive ID when non-nil.
+func getOptUint(req mcpgo.CallToolRequest, key string) *uint {
+	args := req.GetArguments()
+	if v, ok := args[key].(float64); ok && v >= 1 {
+		u := uint(v)
+		return &u
+	}
+	return nil
+}
+
 // getOptStr extracts a *string argument, returns nil if missing.
 // An explicit empty string returns &"" — used to clear optional fields.
 func getOptStr(req mcpgo.CallToolRequest, key string) *string {

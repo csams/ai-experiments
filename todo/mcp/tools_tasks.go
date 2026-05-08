@@ -321,15 +321,20 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// delete_task
 	srv.AddTool(mcpgo.NewTool("delete_task",
-		mcpgo.WithDescription("Delete a task. recursive=false (default): promotes subtasks to top-level. recursive=true: permanently deletes this task AND all subtasks. Fails if any affected task blocks an external task."),
+		mcpgo.WithDescription("Delete a task. recursive=false (default): promotes subtasks to top-level. recursive=true: permanently deletes this task AND all subtasks. By default the task's notes are orphaned (kept as standalone notes); pass delete_notes=true to hard-delete them. Fails if any affected task blocks an external task."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithBoolean("recursive", mcpgo.Description("Delete entire subtask tree (default: false, promotes subtasks)")),
+		mcpgo.WithBoolean("delete_notes", mcpgo.Description("Hard-delete the task's notes instead of orphaning them (default: false)")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
-		if err := s.DeleteTask(ctx, id, getBool(req, "recursive")); err != nil {
+		opts := store.DeleteTaskOptions{
+			Recursive:   getBool(req, "recursive"),
+			DeleteNotes: getBool(req, "delete_notes"),
+		}
+		if err := s.DeleteTask(ctx, id, opts); err != nil {
 			return errResult(err), nil
 		}
 		return textResult(toJSON(map[string]any{"task_id": id, "deleted": true})), nil

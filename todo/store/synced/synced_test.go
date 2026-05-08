@@ -2,6 +2,7 @@ package synced_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"strings"
@@ -207,6 +208,8 @@ func bg() context.Context {
 	return context.Background()
 }
 
+func uintPtr(v uint) *uint { return &v }
+
 // --- Tests ---
 
 func TestSync_CreateTaskEmbedsDocument(t *testing.T) {
@@ -244,7 +247,7 @@ func TestSync_AddNoteEmbedsDocument(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
 	s.CreateTask(bg(), "Task", "", 0, nil, nil)
-	_, err := s.AddNote(bg(), 1, "investigation notes here")
+	_, err := s.AddNote(bg(), uintPtr(1), "investigation notes here")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,6 +263,50 @@ func TestSync_AddNoteEmbedsDocument(t *testing.T) {
 	}
 }
 
+func TestSync_StandaloneNoteEmbedsWithoutTaskID(t *testing.T) {
+	s, _, vs, _ := newTestSetup(t)
+
+	note, err := s.AddNote(bg(), nil, "standalone capture text")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vs.mu.Lock()
+	doc, ok := vs.docs[fmt.Sprintf("note:%d", note.ID)]
+	vs.mu.Unlock()
+	if !ok {
+		t.Fatal("standalone note not embedded")
+	}
+	if _, present := doc.Metadata["task_id"]; present {
+		t.Errorf("standalone note metadata should omit task_id, got: %v", doc.Metadata)
+	}
+	if archived, ok := doc.Metadata["archived"].(bool); !ok || archived {
+		t.Errorf("standalone note metadata archived = %v, want false", doc.Metadata["archived"])
+	}
+}
+
+func TestSync_NoteReparentReembedsMetadata(t *testing.T) {
+	s, _, vs, _ := newTestSetup(t)
+
+	t1, _ := s.CreateTask(bg(), "T1", "", 0, nil, nil)
+	t2, _ := s.CreateTask(bg(), "T2", "", 0, nil, nil)
+	note, _ := s.AddNote(bg(), &t1.ID, "n")
+
+	if _, err := s.UpdateNote(bg(), note.ID, store.UpdateNoteOptions{
+		SetTaskID: true,
+		TaskID:    &t2.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	vs.mu.Lock()
+	doc := vs.docs[fmt.Sprintf("note:%d", note.ID)]
+	vs.mu.Unlock()
+	if got, ok := doc.Metadata["task_id"].(int); !ok || uint(got) != t2.ID {
+		t.Errorf("after reparent, task_id metadata = %v, want %d", doc.Metadata["task_id"], t2.ID)
+	}
+}
+
 func TestSync_DeleteTaskRemovesFromVectorStore(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
@@ -272,7 +319,7 @@ func TestSync_DeleteTaskRemovesFromVectorStore(t *testing.T) {
 		t.Fatal("task should be in vector store before delete")
 	}
 
-	s.DeleteTask(bg(), 1, false)
+	s.DeleteTask(bg(), 1, store.DeleteTaskOptions{})
 
 	vs.mu.Lock()
 	_, hasAfter := vs.docs["task:1"]
@@ -390,7 +437,7 @@ func TestSemanticSearch_Basic(t *testing.T) {
 
 	s.CreateTask(bg(), "Fix authentication bug", "Login token expiry", 1, nil, []string{"auth"})
 	s.CreateTask(bg(), "Update documentation", "README changes", 3, nil, []string{"docs"})
-	s.AddNote(bg(), 1, "Auth tokens expire after 5 minutes")
+	s.AddNote(bg(), uintPtr(1), "Auth tokens expire after 5 minutes")
 
 	results, err := syncer.SemanticSearch(bg(), "authentication token", store.SemanticSearchOptions{
 		Limit: 5,
@@ -413,7 +460,7 @@ func TestSemanticSearch_TypeFilter(t *testing.T) {
 	s, _, _, syncer := newTestSetup(t)
 
 	s.CreateTask(bg(), "Task A", "", 0, nil, nil)
-	s.AddNote(bg(), 1, "Note for task A")
+	s.AddNote(bg(), uintPtr(1), "Note for task A")
 
 	results, err := syncer.SemanticSearch(bg(), "task", store.SemanticSearchOptions{
 		Limit: 10,
@@ -433,7 +480,7 @@ func TestSemanticSearchContext(t *testing.T) {
 	s, _, _, syncer := newTestSetup(t)
 
 	s.CreateTask(bg(), "Auth module", "Handle login flow", 0, nil, nil)
-	s.AddNote(bg(), 1, "Uses JWT tokens")
+	s.AddNote(bg(), uintPtr(1), "Uses JWT tokens")
 	s.CreateTask(bg(), "Token refresh", "Implement refresh tokens", 0, nil, nil)
 
 	results, err := syncer.SemanticSearchContext(bg(), 1, store.SemanticSearchOptions{
@@ -456,7 +503,7 @@ func TestReindex(t *testing.T) {
 
 	s.CreateTask(bg(), "Task 1", "", 0, nil, nil)
 	s.CreateTask(bg(), "Task 2", "", 0, nil, nil)
-	s.AddNote(bg(), 1, "Note 1")
+	s.AddNote(bg(), uintPtr(1), "Note 1")
 
 	// Clear vector store manually
 	vs.mu.Lock()
@@ -486,7 +533,7 @@ func TestReindex_WithClear(t *testing.T) {
 	s, _, vs, syncer := newTestSetup(t)
 
 	s.CreateTask(bg(), "Task 1", "", 0, nil, nil)
-	s.AddNote(bg(), 1, "Note 1")
+	s.AddNote(bg(), uintPtr(1), "Note 1")
 
 	// Reindex with clear=true should reset and repopulate
 	err := syncer.Reindex(bg(), true, nil)
@@ -508,9 +555,9 @@ func TestSemanticSearch_ExcludesArchived(t *testing.T) {
 	s, _, _, syncer := newTestSetup(t)
 
 	s.CreateTask(bg(), "Active task", "This is active", 0, nil, nil)
-	s.AddNote(bg(), 1, "Note on active task")
+	s.AddNote(bg(), uintPtr(1), "Note on active task")
 	s.CreateTask(bg(), "Archived task", "This will be archived", 0, nil, nil)
-	s.AddNote(bg(), 2, "Note on archived task")
+	s.AddNote(bg(), uintPtr(2), "Note on archived task")
 	s.ArchiveTask(bg(), 2, true)
 
 	// Default search (IncludeArchived=false) should exclude archived task and its note
@@ -539,7 +586,7 @@ func TestSemanticSearch_IncludeArchived(t *testing.T) {
 
 	s.CreateTask(bg(), "Active task", "This is active", 0, nil, nil)
 	s.CreateTask(bg(), "Archived task", "This will be archived", 0, nil, nil)
-	s.AddNote(bg(), 2, "Note on archived task")
+	s.AddNote(bg(), uintPtr(2), "Note on archived task")
 	s.ArchiveTask(bg(), 2, true)
 
 	// With IncludeArchived=true, should return all items
@@ -568,7 +615,7 @@ func TestArchiveEvent_UpdatesNoteMetadata(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
 	s.CreateTask(bg(), "Task with notes", "", 0, nil, nil)
-	s.AddNote(bg(), 1, "Important note")
+	s.AddNote(bg(), uintPtr(1), "Important note")
 
 	// Before archive, note should have archived=false
 	vs.mu.Lock()

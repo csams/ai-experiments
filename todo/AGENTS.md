@@ -74,11 +74,11 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (27 core + 2 optional semantic)
+### Available MCP Tools (28 core + 2 optional semantic)
 
 **Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
 
-**Notes:** `add_note`, `update_note`, `list_notes`, `delete_note`
+**Notes:** `add_note`, `update_note`, `list_notes`, `list_all_notes`, `delete_note`
 
 **Links:** `add_link` (with optional `description`), `list_links`, `update_link`, `delete_link`
 
@@ -137,7 +137,7 @@ Blockers are automatically promoted to at least match the priority of tasks they
 - **Title**: required, max 512 characters (Unicode code points)
 - **Description**: optional, max 100,000 characters
 - **Tags**: alphanumeric, hyphens, and underscores only (`[a-zA-Z0-9_-]+`), max 100 chars per tag, max 50 tags per task
-- **Notes**: required non-empty text, max 50,000 characters
+- **Notes**: required non-empty text, max 50,000 characters; `task_id` optional (omit for standalone notes)
 - **Links**: URL required, max 2000 bytes; description optional, max 1000 characters
 - **Search queries**: max 500 characters
 - **Bulk operations**: max 100 IDs per call
@@ -149,6 +149,22 @@ Tasks can be organized in parent-child trees. Use `set_parent` / `unparent`.
 - `list_tasks` shows top-level by default. Use `include_subtasks: true` or `parent_id` filter.
 - Deleting a parent promotes children. Use `recursive: true` to delete the entire subtree.
 - Archiving always cascades to the subtask tree.
+
+## Notes
+
+Notes can either be attached to a task (`task_id` set) or standalone (`task_id` omitted). The model supports both at every layer:
+
+- **Create:** `add_note` accepts an optional `task_id`. Omit it for a standalone note.
+- **List:** `list_notes` with `task_id` returns that task's notes; without `task_id` returns standalone notes only. `list_all_notes` returns every note.
+- **Update / reparent:** `update_note` operates by `note_id` alone. Provide any of `text`, `task_id` (reparent target), `clear_task_id: true` (detach to standalone), or `archived`. At least one must be provided.
+- **Delete:** `delete_note` takes only `note_id`.
+- **Archive:** standalone notes have their own `archived` flag (`note archive <id>` / `note unarchive <id>` from the CLI, or `update_note` with `archived: true|false` via MCP). Task-attached notes also have an `archived` column, but semantic search inherits archived state from the parent task while the note is attached — the per-note flag only takes effect after the note is detached (orphaned or explicitly cleared).
+- **Task deletion:** `delete_task` orphans a task's notes by default (sets `task_id=NULL`); their per-note `archived` flag (typically `false`) then governs them. Pass `delete_notes: true` to hard-delete them instead.
+
+**Migration callouts (breaking changes):**
+- `update_note` no longer takes `task_id` as a "find note in this task" parameter; `task_id` now means "reparent to this task." Clients that previously passed `task_id` plus `text` will silently move the note. Update such callers.
+- `delete_note` no longer takes `task_id` — only `note_id`.
+- The `notes.task_id` column is now nullable. The first run against an existing DB performs an automatic migration (Postgres: `DROP NOT NULL`; SQLite: 12-step ALTER table rebuild).
 
 ## Vector / RAG Setup
 
@@ -168,7 +184,7 @@ Requires Ollama running and PostgreSQL with the pgvector extension (`pgvector/pg
 
 Vector search is only available with the PostgreSQL backend. When using SQLite, vector search is automatically disabled.
 
-A task's embedding text includes its title, description, tags, link descriptions, priority, and state. Notes are embedded as separate documents. Link `description` content is therefore searchable via `semantic_search`; URLs and link types are not embedded. Adding/updating/deleting a link automatically re-embeds its parent task.
+A task's embedding text includes its title, description, tags, link descriptions, priority, and state. Notes are embedded as separate documents (both attached and standalone notes appear in `semantic_search` results). Link `description` content is therefore searchable via `semantic_search`; URLs and link types are not embedded. Adding/updating/deleting a link automatically re-embeds its parent task. Reparenting a note re-embeds the note (with new `task_id` metadata) but does not re-embed any task, since task embeddings do not include note text.
 
 ## TLS Certificates
 

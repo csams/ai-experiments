@@ -21,7 +21,7 @@ type Store interface {
 	RemoveBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error)
 	SetParent(ctx context.Context, id uint, parentID *uint) error
 	ArchiveTask(ctx context.Context, id uint, archived bool) error
-	DeleteTask(ctx context.Context, id uint, recursive bool) error
+	DeleteTask(ctx context.Context, id uint, opts DeleteTaskOptions) error
 	SearchTasks(ctx context.Context, query string) ([]model.Task, error)
 	SearchNotes(ctx context.Context, query string) ([]model.Note, error)
 
@@ -41,11 +41,14 @@ type Store interface {
 	ListLinks(ctx context.Context, taskID uint) ([]model.Link, error)
 	DeleteLink(ctx context.Context, taskID uint, linkID uint) error
 
-	// Notes
-	AddNote(ctx context.Context, taskID uint, text string) (*model.Note, error)
-	UpdateNote(ctx context.Context, taskID uint, noteID uint, text string) (*model.Note, error)
-	ListNotes(ctx context.Context, taskID uint) ([]model.Note, error)
-	DeleteNote(ctx context.Context, taskID uint, noteID uint) error
+	// Notes — taskID nil means standalone (no parent task).
+	AddNote(ctx context.Context, taskID *uint, text string) (*model.Note, error)
+	UpdateNote(ctx context.Context, noteID uint, opts UpdateNoteOptions) (*model.Note, error)
+	ListNotes(ctx context.Context, taskID *uint) ([]model.Note, error) // nil = standalone-only
+	ListAllNotes(ctx context.Context) ([]model.Note, error)
+	GetNotesByIDs(ctx context.Context, ids []uint) ([]model.Note, error)
+	DeleteNote(ctx context.Context, noteID uint) error
+	ArchiveNote(ctx context.Context, noteID uint, archived bool) error
 
 	// Lifecycle
 	Close(ctx context.Context) error
@@ -59,6 +62,23 @@ type UpdateTaskOptions struct {
 	Priority    *int
 	DueAt       *time.Time
 	ClearDueAt  bool // if true, set DueAt to nil
+}
+
+// UpdateNoteOptions holds optional fields for updating a note.
+// Nil pointer fields and SetTaskID=false leave the corresponding column unchanged.
+// To make a note standalone, set SetTaskID=true with TaskID=nil.
+// To reparent, set SetTaskID=true with TaskID=&newID.
+type UpdateNoteOptions struct {
+	Text      *string
+	SetTaskID bool
+	TaskID    *uint
+	Archived  *bool
+}
+
+// DeleteTaskOptions controls task deletion behavior.
+type DeleteTaskOptions struct {
+	Recursive   bool
+	DeleteNotes bool // false = orphan notes (set task_id=NULL); true = hard-delete notes
 }
 
 // UpdateLinkOptions holds optional fields for updating a link.

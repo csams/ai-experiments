@@ -62,7 +62,7 @@ func TestValidation_EmptyTag(t *testing.T) {
 func TestValidation_EmptyNoteText(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
-	_, err := s.AddNote(ctx(), task.ID, "")
+	_, err := s.AddNote(ctx(), &task.ID, "")
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("expected ValidationError for empty note, got %v", err)
@@ -182,7 +182,7 @@ func TestValidation_DescriptionTooLong(t *testing.T) {
 func TestValidation_NoteInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
-	_, err := s.AddNote(ctx(), task.ID, "bad\xffnote")
+	_, err := s.AddNote(ctx(), &task.ID, "bad\xffnote")
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "text" {
 		t.Errorf("expected ValidationError on text for invalid UTF-8, got %v", err)
@@ -193,7 +193,7 @@ func TestValidation_NoteTooLong(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
 	longNote := strings.Repeat("a", 50001)
-	_, err := s.AddNote(ctx(), task.ID, longNote)
+	_, err := s.AddNote(ctx(), &task.ID, longNote)
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "text" {
 		t.Errorf("expected ValidationError on text for >50000 chars, got %v", err)
@@ -296,11 +296,12 @@ func TestValidation_UpdateTaskNFCNormalization(t *testing.T) {
 func TestValidation_UpdateNoteInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
-	note, err := s.AddNote(ctx(), task.ID, "valid note")
+	note, err := s.AddNote(ctx(), &task.ID, "valid note")
 	if err != nil {
 		t.Fatalf("add note: %v", err)
 	}
-	_, err = s.UpdateNote(ctx(), task.ID, note.ID, "bad\xffupdate")
+	badText := "bad\xffupdate"
+	_, err = s.UpdateNote(ctx(), note.ID, store.UpdateNoteOptions{Text: &badText})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "text" {
 		t.Errorf("expected ValidationError on text for invalid UTF-8, got %v", err)
@@ -333,7 +334,7 @@ func TestValidation_NoteExactBoundary(t *testing.T) {
 
 	// Exactly 50000 chars should pass
 	note50k := strings.Repeat("a", 50000)
-	_, err := s.AddNote(ctx(), task.ID, note50k)
+	_, err := s.AddNote(ctx(), &task.ID, note50k)
 	if err != nil {
 		t.Fatalf("50000 chars should succeed, got %v", err)
 	}

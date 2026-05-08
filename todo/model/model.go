@@ -55,7 +55,7 @@ type Task struct {
 	Blockers []Task    `gorm:"many2many:task_blockers;joinForeignKey:TaskID;joinReferences:BlockerID" json:"blockers,omitempty"`
 	Tags     []TaskTag `gorm:"foreignKey:TaskID" json:"tags,omitempty"`
 	Links    []Link    `gorm:"constraint:OnDelete:CASCADE" json:"links,omitempty"`
-	Notes    []Note    `gorm:"constraint:OnDelete:CASCADE" json:"notes,omitempty"`
+	Notes    []Note    `gorm:"foreignKey:TaskID;constraint:OnDelete:SET NULL" json:"notes,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -89,11 +89,13 @@ type Link struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// Note is a free-text annotation attached to a task.
+// Note is a free-text annotation. May be attached to a task (TaskID set) or standalone (TaskID nil).
 type Note struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
-	TaskID      uint      `gorm:"not null;index" json:"task_id"`
+	TaskID      *uint     `gorm:"index" json:"task_id,omitempty"`
 	Text        string    `gorm:"not null" json:"text"`
+	Archived    bool      `gorm:"not null;default:false" json:"archived"`
 	VectorDirty bool      `gorm:"not null;default:false" json:"-"`
 	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }

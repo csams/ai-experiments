@@ -91,8 +91,8 @@ func (v *VectorSyncer) syncLinks(ctx context.Context, event store.StoreEvent) er
 
 func (v *VectorSyncer) syncNotes(ctx context.Context, event store.StoreEvent) error {
 	switch event.Type {
-	case "note.created", "note.updated":
-		return v.embedNotes(ctx, event.TaskIDs, event.NoteIDs)
+	case "note.created", "note.updated", "note.archived", "note.unarchived":
+		return v.embedNotes(ctx, event.NoteIDs)
 	case "note.deleted":
 		var ids []string
 		for _, nid := range event.NoteIDs {
@@ -148,55 +148,63 @@ func (v *VectorSyncer) embedTasks(ctx context.Context, taskIDs []uint) error {
 	return v.vs.Upsert(ctx, docs)
 }
 
-func (v *VectorSyncer) embedNotes(ctx context.Context, taskIDs []uint, noteIDs []uint) error {
-	if len(taskIDs) != len(noteIDs) {
-		return fmt.Errorf("taskIDs/noteIDs length mismatch: %d vs %d", len(taskIDs), len(noteIDs))
+func (v *VectorSyncer) embedNotes(ctx context.Context, noteIDs []uint) error {
+	if len(noteIDs) == 0 {
+		return nil
+	}
+	notes, err := v.store.GetNotesByIDs(ctx, noteIDs)
+	if err != nil {
+		return fmt.Errorf("loading notes: %w", err)
+	}
+	if len(notes) == 0 {
+		return nil
+	}
+
+	// Cache parent task archived flag for task-attached notes.
+	// Returns (archived, found) — not-found tasks (e.g. orphan with stale task_id
+	// during a race) are treated as standalone for metadata purposes.
+	archivedCache := map[uint]bool{}
+	missingCache := map[uint]bool{}
+	getArchived := func(taskID uint) (bool, bool) {
+		if a, ok := archivedCache[taskID]; ok {
+			return a, true
+		}
+		if missingCache[taskID] {
+			return false, false
+		}
+		detail, err := v.store.GetTask(ctx, taskID)
+		if err != nil {
+			missingCache[taskID] = true
+			return false, false
+		}
+		archivedCache[taskID] = detail.Archived
+		return detail.Archived, true
 	}
 
 	var docs []vectorstore.Document
 	var texts []string
-
-	// Cache ListNotes and task archived status by taskID to avoid duplicate calls
-	noteCache := map[uint][]model.Note{}
-	archivedCache := map[uint]bool{}
-	for i, nid := range noteIDs {
-		taskID := taskIDs[i]
-
-		if _, cached := noteCache[taskID]; !cached {
-			notes, err := v.store.ListNotes(ctx, taskID)
-			if err != nil {
-				continue
-			}
-			noteCache[taskID] = notes
+	for _, n := range notes {
+		meta := map[string]any{
+			"type":    "note",
+			"note_id": int(n.ID),
 		}
-		if _, cached := archivedCache[taskID]; !cached {
-			detail, err := v.store.GetTask(ctx, taskID)
-			if err != nil {
-				continue
+		if n.TaskID != nil {
+			if archived, found := getArchived(*n.TaskID); found {
+				meta["task_id"] = int(*n.TaskID)
+				meta["archived"] = archived
+			} else {
+				// Stale task_id (parent missing); treat as standalone.
+				meta["archived"] = n.Archived
 			}
-			archivedCache[taskID] = detail.Archived
+		} else {
+			meta["archived"] = n.Archived
 		}
-
-		for _, n := range noteCache[taskID] {
-			if n.ID == nid {
-				texts = append(texts, n.Text)
-				docs = append(docs, vectorstore.Document{
-					ID:   fmt.Sprintf("note:%d", n.ID),
-					Text: n.Text,
-					Metadata: map[string]any{
-						"type":     "note",
-						"task_id":  int(n.TaskID),
-						"note_id":  int(n.ID),
-						"archived": archivedCache[taskID],
-					},
-				})
-				break
-			}
-		}
-	}
-
-	if len(docs) == 0 {
-		return nil
+		texts = append(texts, n.Text)
+		docs = append(docs, vectorstore.Document{
+			ID:       fmt.Sprintf("note:%d", n.ID),
+			Text:     n.Text,
+			Metadata: meta,
+		})
 	}
 
 	vecs, err := v.embedder.EmbedBatch(ctx, texts)
@@ -216,21 +224,21 @@ func (v *VectorSyncer) embedNotes(ctx context.Context, taskIDs []uint, noteIDs [
 
 // reembedTaskNotes re-embeds all notes for the given tasks, updating their metadata.
 func (v *VectorSyncer) reembedTaskNotes(ctx context.Context, taskIDs []uint) error {
-	var allTaskIDs, allNoteIDs []uint
+	var allNoteIDs []uint
 	for _, tid := range taskIDs {
-		notes, err := v.store.ListNotes(ctx, tid)
+		t := tid
+		notes, err := v.store.ListNotes(ctx, &t)
 		if err != nil {
 			continue
 		}
 		for _, n := range notes {
-			allTaskIDs = append(allTaskIDs, tid)
 			allNoteIDs = append(allNoteIDs, n.ID)
 		}
 	}
 	if len(allNoteIDs) == 0 {
 		return nil
 	}
-	return v.embedNotes(ctx, allTaskIDs, allNoteIDs)
+	return v.embedNotes(ctx, allNoteIDs)
 }
 
 // markDirty logs a warning when vector sync fails so operators know to reindex.
@@ -394,20 +402,10 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		taskArchived[t.ID] = t.Archived
 	}
 
-	// Fetch all notes for all tasks
-	type noteEntry struct {
-		note   model.Note
-		taskID uint
-	}
-	var allNotes []noteEntry
-	for _, t := range tasks {
-		notes, err := v.store.ListNotes(ctx, t.ID)
-		if err != nil {
-			continue
-		}
-		for _, n := range notes {
-			allNotes = append(allNotes, noteEntry{note: n, taskID: t.ID})
-		}
+	// Fetch all notes (attached + standalone).
+	allNotes, err := v.store.ListAllNotes(ctx)
+	if err != nil {
+		return fmt.Errorf("listing notes: %w", err)
 	}
 
 	total := len(tasks) + len(allNotes)
@@ -475,17 +473,27 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 
 		var docs []vectorstore.Document
 		var texts []string
-		for _, ne := range batch {
-			texts = append(texts, ne.note.Text)
+		for _, n := range batch {
+			meta := map[string]any{
+				"type":    "note",
+				"note_id": int(n.ID),
+			}
+			if n.TaskID != nil {
+				meta["task_id"] = int(*n.TaskID)
+				if a, ok := taskArchived[*n.TaskID]; ok {
+					meta["archived"] = a
+				} else {
+					// Orphan with stale task_id; treat as standalone.
+					meta["archived"] = n.Archived
+				}
+			} else {
+				meta["archived"] = n.Archived
+			}
+			texts = append(texts, n.Text)
 			docs = append(docs, vectorstore.Document{
-				ID:   fmt.Sprintf("note:%d", ne.note.ID),
-				Text: ne.note.Text,
-				Metadata: map[string]any{
-					"type":     "note",
-					"task_id":  int(ne.taskID),
-					"note_id":  int(ne.note.ID),
-					"archived": taskArchived[ne.taskID],
-				},
+				ID:       fmt.Sprintf("note:%d", n.ID),
+				Text:     n.Text,
+				Metadata: meta,
 			})
 		}
 
