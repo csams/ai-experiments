@@ -148,7 +148,11 @@ func outputTaskDetail(detail *model.TaskDetail) {
 	if len(t.Links) > 0 {
 		fmt.Println("\n  Links:")
 		for _, l := range t.Links {
-			fmt.Printf("    [%s] %s\n", l.Type, l.URL)
+			if l.Description != "" {
+				fmt.Printf("    [%s] %s — %s\n", l.Type, l.URL, l.Description)
+			} else {
+				fmt.Printf("    [%s] %s\n", l.Type, l.URL)
+			}
 		}
 	}
 	if len(t.Notes) > 0 {
@@ -185,7 +189,11 @@ func outputLinks(links []model.Link) {
 		return
 	}
 	for _, l := range links {
-		fmt.Printf("#%d [%s] %s\n", l.ID, l.Type, l.URL)
+		if l.Description != "" {
+			fmt.Printf("#%d [%s] %s — %s\n", l.ID, l.Type, l.URL, l.Description)
+		} else {
+			fmt.Printf("#%d [%s] %s\n", l.ID, l.Type, l.URL)
+		}
 	}
 }
 

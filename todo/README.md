@@ -15,7 +15,7 @@ A task tracking system designed for both CLI use and AI agent access via MCP (Mo
 - **Bulk operations**: state, priority, and tag changes across multiple tasks
 - **Full-text search**: tasks and notes
 - **Semantic search** (optional): vector similarity via Ollama/OpenAI + pgvector (PostgreSQL)
-- **MCP server**: 28 tools for AI agent access (26 core + 2 semantic search; stdio + HTTP transports)
+- **MCP server**: 29 tools for AI agent access (27 core + 2 semantic search; stdio + HTTP transports)
 - **Structured audit logging**: all mutations logged with before/after state
 - **YAML configuration**: with env var overrides
 - **Pluggable storage**: SQLite (default) or PostgreSQL via GORM
@@ -58,8 +58,12 @@ go build -o todo .
 
 # Links (type auto-detected)
 ./todo link add 1 "AUTH-456"                                    # jira
+./todo link add 1 "AUTH-456" -d "Original auth ticket"          # with description
 ./todo link add 1 "https://github.com/org/repo/pull/42"        # pr
 ./todo link add 1 "https://wiki.example.com/auth-design" --type url
+./todo link update 1 7 -d "Updated context"                     # edit description
+./todo link update 1 7 --url "AUTH-789"                         # fix the URL
+./todo link update 1 7 -d ""                                    # clear description
 
 # Tags
 ./todo task tag 1 backend urgent
@@ -258,7 +262,7 @@ embed/              Embedder interface + Ollama/OpenAI implementations
 vectorstore/        VectorStore interface + pgvector implementation
 audit/              Structured audit logger (StoreObserver)
 cmd/                Cobra CLI (20 command files)
-mcp/                MCP server (8 files, 28 tools)
+mcp/                MCP server (8 files, 29 tools)
 deploy/             Container + quadlet deployment files
 ```
 

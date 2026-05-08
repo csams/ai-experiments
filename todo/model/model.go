@@ -81,11 +81,12 @@ type TaskTag struct {
 
 // Link is an external reference (JIRA, PR, URL) attached to a task.
 type Link struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	TaskID    uint      `gorm:"not null;index" json:"task_id"`
-	Type      LinkType  `gorm:"not null;size:10" json:"type"`
-	URL       string    `gorm:"not null;size:2000" json:"url"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	TaskID      uint      `gorm:"not null;index" json:"task_id"`
+	Type        LinkType  `gorm:"not null;size:10" json:"type"`
+	URL         string    `gorm:"not null;size:2000" json:"url"`
+	Description string    `gorm:"size:1000" json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // Note is a free-text annotation attached to a task.

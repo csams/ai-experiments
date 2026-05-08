@@ -40,6 +40,8 @@ func (v *VectorSyncer) OnEvent(ctx context.Context, event store.StoreEvent) {
 		err = v.syncTasks(ctx, event)
 	case strings.HasPrefix(event.Type, "note."):
 		err = v.syncNotes(ctx, event)
+	case strings.HasPrefix(event.Type, "link."):
+		err = v.syncLinks(ctx, event)
 	}
 	if err != nil {
 		v.logger.Warn("vector sync failed",
@@ -79,6 +81,12 @@ func (v *VectorSyncer) syncTasks(ctx context.Context, event store.StoreEvent) er
 	default:
 		return v.embedTasks(ctx, event.TaskIDs)
 	}
+}
+
+// syncLinks re-embeds the parent task whenever any of its links change,
+// because the task's embedding text includes each link's description.
+func (v *VectorSyncer) syncLinks(ctx context.Context, event store.StoreEvent) error {
+	return v.embedTasks(ctx, event.TaskIDs)
 }
 
 func (v *VectorSyncer) syncNotes(ctx context.Context, event store.StoreEvent) error {
@@ -236,6 +244,7 @@ func (v *VectorSyncer) markDirty(_ context.Context, event store.StoreEvent) {
 }
 
 // buildTaskEmbedText creates the enriched text for task embedding.
+// Caller must populate t.Tags and t.Links if they want them included.
 func buildTaskEmbedText(t model.Task) string {
 	var b strings.Builder
 	b.WriteString(t.Title)
@@ -250,6 +259,16 @@ func buildTaskEmbedText(t model.Task) string {
 			tags[i] = tt.Tag
 		}
 		b.WriteString(strings.Join(tags, ", "))
+	}
+	var linkDescs []string
+	for _, l := range t.Links {
+		if l.Description != "" {
+			linkDescs = append(linkDescs, l.Description)
+		}
+	}
+	if len(linkDescs) > 0 {
+		b.WriteString(". Links: ")
+		b.WriteString(strings.Join(linkDescs, "; "))
 	}
 	fmt.Fprintf(&b, ". Priority: %d. State: %s.", t.Priority, t.State)
 	return b.String()
@@ -300,6 +319,12 @@ func (v *VectorSyncer) SemanticSearchContext(ctx context.Context, taskID uint, o
 	if detail.Description != "" {
 		b.WriteString(". ")
 		b.WriteString(detail.Description)
+	}
+	for _, l := range detail.Links {
+		if l.Description != "" {
+			b.WriteString(". ")
+			b.WriteString(l.Description)
+		}
 	}
 	for _, n := range detail.Notes {
 		b.WriteString(". ")
@@ -400,6 +425,11 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		var docs []vectorstore.Document
 		var texts []string
 		for _, t := range batch {
+			// ListTasks only preloads Tags; load Links so their descriptions
+			// land in the embedding text.
+			if links, err := v.store.ListLinks(ctx, t.ID); err == nil {
+				t.Links = links
+			}
 			text := buildTaskEmbedText(t)
 			texts = append(texts, text)
 			docs = append(docs, vectorstore.Document{

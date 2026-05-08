@@ -72,7 +72,7 @@ func TestValidation_EmptyNoteText(t *testing.T) {
 func TestValidation_EmptyLinkURL(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
-	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "")
+	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "", "")
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("expected ValidationError for empty URL, got %v", err)
@@ -203,10 +203,44 @@ func TestValidation_NoteTooLong(t *testing.T) {
 func TestValidation_URLInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
-	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com/\xff")
+	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com/\xff", "")
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "url" {
 		t.Errorf("expected ValidationError on url for invalid UTF-8, got %v", err)
+	}
+}
+
+func TestValidation_LinkDescriptionTooLong(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	tooLong := strings.Repeat("a", 1001)
+	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com", tooLong)
+	var ve *model.ValidationError
+	if !errors.As(err, &ve) || ve.Field != "description" {
+		t.Errorf("expected ValidationError on description for >1000 chars, got %v", err)
+	}
+}
+
+func TestValidation_LinkDescriptionInvalidUTF8(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com", "bad\xffdesc")
+	var ve *model.ValidationError
+	if !errors.As(err, &ve) || ve.Field != "description" {
+		t.Errorf("expected ValidationError on description for invalid UTF-8, got %v", err)
+	}
+}
+
+func TestValidation_LinkDescriptionEmptyAllowed(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	link, err := s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com", "")
+	if err != nil {
+		t.Fatalf("empty description on AddLink should be allowed: %v", err)
+	}
+	empty := ""
+	if _, err := s.UpdateLink(ctx(), task.ID, link.ID, store.UpdateLinkOptions{Description: &empty}); err != nil {
+		t.Fatalf("empty description on UpdateLink should be allowed: %v", err)
 	}
 }
 

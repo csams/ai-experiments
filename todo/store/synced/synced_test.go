@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/csams/todo/model"
 	"github.com/csams/todo/store"
 	"github.com/csams/todo/store/gormstore"
 	"github.com/csams/todo/store/synced"
@@ -278,6 +279,109 @@ func TestSync_DeleteTaskRemovesFromVectorStore(t *testing.T) {
 	vs.mu.Unlock()
 	if hasAfter {
 		t.Error("task should be removed from vector store after delete")
+	}
+}
+
+func TestSync_AddLinkRefreshesTaskEmbedding(t *testing.T) {
+	s, _, vs, _ := newTestSetup(t)
+
+	s.CreateTask(bg(), "Auth bug", "", 0, nil, nil)
+	if _, err := s.AddLink(bg(), 1, model.LinkJira, "AUTH-456", "original ticket describing the regression"); err != nil {
+		t.Fatal(err)
+	}
+
+	vs.mu.Lock()
+	doc, ok := vs.docs["task:1"]
+	vs.mu.Unlock()
+	if !ok {
+		t.Fatal("expected task:1 in vector store")
+	}
+	if !strings.Contains(doc.Text, "original ticket describing the regression") {
+		t.Errorf("link description not folded into task embedding text: %q", doc.Text)
+	}
+}
+
+func TestSync_UpdateLinkDescriptionRefreshesTaskEmbedding(t *testing.T) {
+	s, _, vs, _ := newTestSetup(t)
+
+	s.CreateTask(bg(), "Task", "", 0, nil, nil)
+	link, _ := s.AddLink(bg(), 1, model.LinkURL, "https://x.example.com", "first description")
+
+	newDesc := "second description after edit"
+	if _, err := s.UpdateLink(bg(), 1, link.ID, store.UpdateLinkOptions{Description: &newDesc}); err != nil {
+		t.Fatal(err)
+	}
+
+	vs.mu.Lock()
+	doc := vs.docs["task:1"]
+	vs.mu.Unlock()
+	if strings.Contains(doc.Text, "first description") {
+		t.Errorf("stale link description should be replaced after update: %q", doc.Text)
+	}
+	if !strings.Contains(doc.Text, "second description after edit") {
+		t.Errorf("updated link description not in embedding: %q", doc.Text)
+	}
+}
+
+func TestSync_ClearLinkDescriptionRefreshesTaskEmbedding(t *testing.T) {
+	s, _, vs, _ := newTestSetup(t)
+
+	s.CreateTask(bg(), "Task", "", 0, nil, nil)
+	link, _ := s.AddLink(bg(), 1, model.LinkURL, "https://x.example.com", "secret content to remove")
+
+	empty := ""
+	if _, err := s.UpdateLink(bg(), 1, link.ID, store.UpdateLinkOptions{Description: &empty}); err != nil {
+		t.Fatal(err)
+	}
+
+	vs.mu.Lock()
+	doc := vs.docs["task:1"]
+	vs.mu.Unlock()
+	if strings.Contains(doc.Text, "secret content to remove") {
+		t.Errorf("cleared description should be gone from embedding: %q", doc.Text)
+	}
+}
+
+func TestSync_DeleteLinkRefreshesTaskEmbedding(t *testing.T) {
+	s, _, vs, _ := newTestSetup(t)
+
+	s.CreateTask(bg(), "Task", "", 0, nil, nil)
+	link, _ := s.AddLink(bg(), 1, model.LinkURL, "https://x.example.com", "to be removed")
+
+	if err := s.DeleteLink(bg(), 1, link.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	vs.mu.Lock()
+	doc := vs.docs["task:1"]
+	vs.mu.Unlock()
+	if strings.Contains(doc.Text, "to be removed") {
+		t.Errorf("deleted link description should not be in embedding: %q", doc.Text)
+	}
+}
+
+func TestReindex_IncludesLinkDescriptions(t *testing.T) {
+	s, _, vs, syncer := newTestSetup(t)
+
+	s.CreateTask(bg(), "Reindex me", "", 0, nil, nil)
+	s.AddLink(bg(), 1, model.LinkJira, "PROJ-1", "searchable link content")
+
+	vs.mu.Lock()
+	vs.docs = make(map[string]vectorstore.Document)
+	vs.mu.Unlock()
+
+	if err := syncer.Reindex(bg(), false, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	vs.mu.Lock()
+	doc, ok := vs.docs["task:1"]
+	vs.mu.Unlock()
+	if !ok {
+		t.Fatal("expected task:1 after reindex")
+	}
+	if !strings.Contains(doc.Text, "searchable link content") {
+		t.Errorf("Reindex should include link description in task embedding: %q", doc.Text)
 	}
 }
 

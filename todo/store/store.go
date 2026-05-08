@@ -36,7 +36,8 @@ type Store interface {
 	RemoveTags(ctx context.Context, taskID uint, tags []string) error
 
 	// Links
-	AddLink(ctx context.Context, taskID uint, linkType model.LinkType, url string) (*model.Link, error)
+	AddLink(ctx context.Context, taskID uint, linkType model.LinkType, url, description string) (*model.Link, error)
+	UpdateLink(ctx context.Context, taskID, linkID uint, opts UpdateLinkOptions) (*model.Link, error)
 	ListLinks(ctx context.Context, taskID uint) ([]model.Link, error)
 	DeleteLink(ctx context.Context, taskID uint, linkID uint) error
 
@@ -58,6 +59,16 @@ type UpdateTaskOptions struct {
 	Priority    *int
 	DueAt       *time.Time
 	ClearDueAt  bool // if true, set DueAt to nil
+}
+
+// UpdateLinkOptions holds optional fields for updating a link.
+// Nil pointer fields are not changed. For Description, &"" explicitly clears
+// the field to empty (description is optional). URL must remain non-empty —
+// passing &"" is rejected by validateLinkURL.
+type UpdateLinkOptions struct {
+	Type        *model.LinkType
+	URL         *string
+	Description *string
 }
 
 // ListTasksOptions controls filtering and sorting for ListTasks.

@@ -72,7 +72,7 @@ func TestGetTask_WithDetails(t *testing.T) {
 
 	task, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, []string{"tag1"})
 	s.AddNote(ctx(), task.ID, "a note")
-	s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-123")
+	s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-123", "")
 
 	detail, err := s.GetTask(ctx(), task.ID)
 	if err != nil {
@@ -214,7 +214,7 @@ func TestDeleteTask_CascadesNotesLinksTagsBlockers(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, []string{"tag1"})
 	s.AddNote(ctx(), task.ID, "note")
-	s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com")
+	s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com", "")
 
 	if err := s.DeleteTask(ctx(), task.ID, false); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -287,17 +287,20 @@ func TestLinks_CRUD(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
 
-	link, err := s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-123")
+	link, err := s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-123", "auth ticket")
 	if err != nil {
 		t.Fatalf("add link: %v", err)
 	}
-	if link.Type != model.LinkJira || link.URL != "PROJ-123" {
+	if link.Type != model.LinkJira || link.URL != "PROJ-123" || link.Description != "auth ticket" {
 		t.Errorf("unexpected link: %+v", link)
 	}
 
 	links, _ := s.ListLinks(ctx(), task.ID)
 	if len(links) != 1 {
 		t.Errorf("links = %d, want 1", len(links))
+	}
+	if links[0].Description != "auth ticket" {
+		t.Errorf("description not persisted via ListLinks: %q", links[0].Description)
 	}
 
 	if err := s.DeleteLink(ctx(), task.ID, link.ID); err != nil {
@@ -312,9 +315,126 @@ func TestLinks_CRUD(t *testing.T) {
 func TestAddLink_InvalidType(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
-	_, err := s.AddLink(ctx(), task.ID, "invalid", "url")
+	_, err := s.AddLink(ctx(), task.ID, "invalid", "url", "")
 	if err == nil {
 		t.Fatal("expected error for invalid link type")
+	}
+}
+
+func TestUpdateLink_PartialFields(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	link, _ := s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-123", "original")
+
+	// description-only update leaves type and URL intact
+	desc := "updated"
+	updated, err := s.UpdateLink(ctx(), task.ID, link.ID, store.UpdateLinkOptions{Description: &desc})
+	if err != nil {
+		t.Fatalf("update description: %v", err)
+	}
+	if updated.Description != "updated" || updated.Type != model.LinkJira || updated.URL != "PROJ-123" {
+		t.Errorf("unexpected after description-only update: %+v", updated)
+	}
+
+	// url-only update
+	newURL := "PROJ-999"
+	updated, err = s.UpdateLink(ctx(), task.ID, link.ID, store.UpdateLinkOptions{URL: &newURL})
+	if err != nil {
+		t.Fatalf("update url: %v", err)
+	}
+	if updated.URL != "PROJ-999" || updated.Description != "updated" || updated.Type != model.LinkJira {
+		t.Errorf("unexpected after url-only update: %+v", updated)
+	}
+
+	// type-only update
+	newType := model.LinkURL
+	updated, err = s.UpdateLink(ctx(), task.ID, link.ID, store.UpdateLinkOptions{Type: &newType})
+	if err != nil {
+		t.Fatalf("update type: %v", err)
+	}
+	if updated.Type != model.LinkURL || updated.URL != "PROJ-999" || updated.Description != "updated" {
+		t.Errorf("unexpected after type-only update: %+v", updated)
+	}
+}
+
+func TestUpdateLink_AllNilOpts(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	link, _ := s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-1", "desc")
+
+	obs := &recordingObserver{}
+	s.AddObserver(obs)
+
+	got, err := s.UpdateLink(ctx(), task.ID, link.ID, store.UpdateLinkOptions{})
+	if err != nil {
+		t.Fatalf("no-op update: %v", err)
+	}
+	if got.URL != "PROJ-1" || got.Type != model.LinkJira || got.Description != "desc" {
+		t.Errorf("link mutated by no-op update: %+v", got)
+	}
+	if n := len(obs.events); n != 0 {
+		t.Errorf("no-op UpdateLink emitted %d events; expected 0", n)
+	}
+}
+
+func TestUpdateLink_ClearsDescription(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	link, _ := s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-1", "to-be-cleared")
+
+	empty := ""
+	updated, err := s.UpdateLink(ctx(), task.ID, link.ID, store.UpdateLinkOptions{Description: &empty})
+	if err != nil {
+		t.Fatalf("clear description: %v", err)
+	}
+	if updated.Description != "" {
+		t.Errorf("description not cleared: %q", updated.Description)
+	}
+}
+
+func TestUpdateLink_NotFound(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+
+	desc := "x"
+	// nonexistent link_id
+	_, err := s.UpdateLink(ctx(), task.ID, 999, store.UpdateLinkOptions{Description: &desc})
+	if !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for missing link, got %v", err)
+	}
+
+	// link belongs to a different task
+	otherTask, _ := s.CreateTask(ctx(), "Other", "", 0, nil, nil)
+	link, _ := s.AddLink(ctx(), otherTask.ID, model.LinkJira, "PROJ-1", "")
+	_, err = s.UpdateLink(ctx(), task.ID, link.ID, store.UpdateLinkOptions{Description: &desc})
+	if !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for cross-task link, got %v", err)
+	}
+}
+
+func TestUpdateLink_InvalidType(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	link, _ := s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-1", "")
+
+	bad := model.LinkType("nope")
+	_, err := s.UpdateLink(ctx(), task.ID, link.ID, store.UpdateLinkOptions{Type: &bad})
+	var ve *model.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValidationError, got %v", err)
+	}
+}
+
+func TestUpdateLink_EmptyURLRejected(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	link, _ := s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-1", "")
+
+	empty := ""
+	_, err := s.UpdateLink(ctx(), task.ID, link.ID, store.UpdateLinkOptions{URL: &empty})
+	var ve *model.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValidationError for empty URL, got %v", err)
 	}
 }
 

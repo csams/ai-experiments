@@ -161,6 +161,16 @@ func getOptInt(req mcpgo.CallToolRequest, key string) *int {
 	return nil
 }
 
+// getOptStr extracts a *string argument, returns nil if missing.
+// An explicit empty string returns &"" — used to clear optional fields.
+func getOptStr(req mcpgo.CallToolRequest, key string) *string {
+	args := req.GetArguments()
+	if v, ok := args[key].(string); ok {
+		return &v
+	}
+	return nil
+}
+
 // toJSON marshals v to a pretty JSON string.
 func toJSON(v any) string {
 	b, err := json.MarshalIndent(v, "", "  ")

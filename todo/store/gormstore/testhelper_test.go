@@ -4,11 +4,22 @@ import (
 	"context"
 	"testing"
 
+	"github.com/csams/todo/store"
 	"github.com/csams/todo/store/gormstore"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+// recordingObserver captures every StoreEvent it receives. Tests use it to
+// assert that mutations emit (or do not emit) events.
+type recordingObserver struct {
+	events []store.StoreEvent
+}
+
+func (r *recordingObserver) OnEvent(_ context.Context, e store.StoreEvent) {
+	r.events = append(r.events, e)
+}
 
 // newTestStore creates a fresh in-memory SQLite GormStore for testing.
 func newTestStore(t *testing.T) *gormstore.GormStore {

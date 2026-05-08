@@ -198,6 +198,17 @@ func validateLinkURL(url string) (string, error) {
 	return clean, nil
 }
 
+func validateLinkDescription(desc string) (string, error) {
+	clean, err := textutil.Sanitize(desc)
+	if err != nil {
+		return "", &model.ValidationError{Field: "description", Message: err.Error()}
+	}
+	if utf8.RuneCountInString(clean) > 1000 {
+		return "", &model.ValidationError{Field: "description", Message: "max 1000 characters"}
+	}
+	return clean, nil
+}
+
 func validateSearchQuery(q string) (string, error) {
 	clean, err := textutil.Sanitize(q)
 	if err != nil {
@@ -1535,7 +1546,7 @@ func (s *GormStore) RemoveTags(ctx context.Context, taskID uint, tags []string) 
 
 // --- Links ---
 
-func (s *GormStore) AddLink(ctx context.Context, taskID uint, linkType model.LinkType, url string) (*model.Link, error) {
+func (s *GormStore) AddLink(ctx context.Context, taskID uint, linkType model.LinkType, url, description string) (*model.Link, error) {
 	if err := validateID(taskID); err != nil {
 		return nil, err
 	}
@@ -1546,9 +1557,12 @@ func (s *GormStore) AddLink(ctx context.Context, taskID uint, linkType model.Lin
 	if url, err = validateLinkURL(url); err != nil {
 		return nil, err
 	}
+	if description, err = validateLinkDescription(description); err != nil {
+		return nil, err
+	}
 
 	db := s.db.WithContext(ctx)
-	link := model.Link{TaskID: taskID, Type: linkType, URL: url}
+	link := model.Link{TaskID: taskID, Type: linkType, URL: url, Description: description}
 	err = db.Transaction(func(tx *gorm.DB) error {
 		if _, err := s.taskExistsActive(tx, taskID); err != nil {
 			return err
@@ -1563,6 +1577,67 @@ func (s *GormStore) AddLink(ctx context.Context, taskID uint, linkType model.Lin
 		Type:    "link.created",
 		TaskIDs: []uint{taskID},
 	})
+
+	return &link, nil
+}
+
+func (s *GormStore) UpdateLink(ctx context.Context, taskID, linkID uint, opts store.UpdateLinkOptions) (*model.Link, error) {
+	if err := validateID(taskID); err != nil {
+		return nil, err
+	}
+	if err := validateID(linkID); err != nil {
+		return nil, err
+	}
+
+	updates := map[string]any{}
+	if opts.Type != nil {
+		if !model.ValidLinkTypes[*opts.Type] {
+			return nil, &model.ValidationError{Field: "type", Message: fmt.Sprintf("invalid link type: %s", *opts.Type)}
+		}
+		updates["type"] = *opts.Type
+	}
+	if opts.URL != nil {
+		clean, err := validateLinkURL(*opts.URL)
+		if err != nil {
+			return nil, err
+		}
+		updates["url"] = clean
+	}
+	if opts.Description != nil {
+		clean, err := validateLinkDescription(*opts.Description)
+		if err != nil {
+			return nil, err
+		}
+		updates["description"] = clean
+	}
+
+	db := s.db.WithContext(ctx)
+	var link model.Link
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.taskExistsActive(tx, taskID); err != nil {
+			return err
+		}
+		if err := tx.Where("id = ? AND task_id = ?", linkID, taskID).First(&link).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("link %d for task %d: %w", linkID, taskID, model.ErrNotFound)
+			}
+			return err
+		}
+		if len(updates) == 0 {
+			return nil
+		}
+		return tx.Model(&link).Updates(updates).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(updates) > 0 {
+		s.emit(ctx, store.StoreEvent{
+			Type:    "link.updated",
+			TaskIDs: []uint{taskID},
+		})
+	}
 
 	return &link, nil
 }

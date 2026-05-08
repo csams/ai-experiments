@@ -74,13 +74,13 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (26 core + 2 optional semantic)
+### Available MCP Tools (27 core + 2 optional semantic)
 
 **Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
 
 **Notes:** `add_note`, `update_note`, `list_notes`, `delete_note`
 
-**Links:** `add_link`, `list_links`, `delete_link`
+**Links:** `add_link` (with optional `description`), `list_links`, `update_link`, `delete_link`
 
 **Tags:** `add_tags`, `remove_tags`
 
@@ -138,7 +138,7 @@ Blockers are automatically promoted to at least match the priority of tasks they
 - **Description**: optional, max 100,000 characters
 - **Tags**: alphanumeric, hyphens, and underscores only (`[a-zA-Z0-9_-]+`), max 100 chars per tag, max 50 tags per task
 - **Notes**: required non-empty text, max 50,000 characters
-- **Links**: URL required, max 2000 bytes
+- **Links**: URL required, max 2000 bytes; description optional, max 1000 characters
 - **Search queries**: max 500 characters
 - **Bulk operations**: max 100 IDs per call
 
@@ -167,6 +167,8 @@ vector:
 Requires Ollama running and PostgreSQL with the pgvector extension (`pgvector/pgvector:pg16` image). Use `todo vector reindex` to build/rebuild the index.
 
 Vector search is only available with the PostgreSQL backend. When using SQLite, vector search is automatically disabled.
+
+A task's embedding text includes its title, description, tags, link descriptions, priority, and state. Notes are embedded as separate documents. Link `description` content is therefore searchable via `semantic_search`; URLs and link types are not embedded. Adding/updating/deleting a link automatically re-embeds its parent task.
 
 ## TLS Certificates
 
