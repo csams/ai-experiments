@@ -74,13 +74,15 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (28 core + 2 optional semantic)
+### Available MCP Tools (31 core + 2 optional semantic)
 
 **Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
 
 **Notes:** `add_note`, `update_note`, `list_notes`, `list_all_notes`, `delete_note`
 
 **Links:** `add_link` (with optional `description`), `list_links`, `update_link`, `delete_link`
+
+**Checkpoints:** `set_checkpoint`, `get_checkpoint`, `delete_checkpoint`
 
 **Tags:** `add_tags`, `remove_tags`
 
@@ -139,6 +141,7 @@ Blockers are automatically promoted to at least match the priority of tasks they
 - **Tags**: alphanumeric, hyphens, and underscores only (`[a-zA-Z0-9_-]+`), max 100 chars per tag, max 50 tags per task
 - **Notes**: required non-empty text, max 50,000 characters; `task_id` optional (omit for standalone notes)
 - **Links**: URL required, max 2000 bytes; description optional, max 1000 characters
+- **Checkpoints**: `recap` required, `next_steps` required, `open_threads` optional — each field max 10,000 characters
 - **Search queries**: max 500 characters
 - **Bulk operations**: max 100 IDs per call
 
@@ -165,6 +168,18 @@ Notes can either be attached to a task (`task_id` set) or standalone (`task_id` 
 - `update_note` no longer takes `task_id` as a "find note in this task" parameter; `task_id` now means "reparent to this task." Clients that previously passed `task_id` plus `text` will silently move the note. Update such callers.
 - `delete_note` no longer takes `task_id` — only `note_id`.
 - The `notes.task_id` column is now nullable. The first run against an existing DB performs an automatic migration (Postgres: `DROP NOT NULL`; SQLite: 12-step ALTER table rebuild).
+
+## Checkpoints
+
+A **checkpoint** is a singleton "resume here" bookmark per task — at most one per task, DB-enforced via a unique index on `task_id`. Separate from notes: notes capture durable knowledge; checkpoints are transient pointers that say "you were here."
+
+- **Three fields:** `recap` (required), `next_steps` (required), `open_threads` (optional). Max 10,000 characters each.
+- **Upsert semantics:** `set_checkpoint` creates if absent, replaces if present. There is no separate `add`/`update` split.
+- **Not embedded:** checkpoints are not indexed in the vector store and do not appear in `semantic_search` results. They are bookmarks, not searchable knowledge.
+- **Archive behavior:** `set_checkpoint` is rejected on archived tasks (`ErrArchived`); `get_checkpoint` and `delete_checkpoint` work against archived tasks so a paused-then-archived task remains readable and cleanable.
+- **Task deletion** cascades to the checkpoint. Task archival does not delete it.
+- **`get_task`** includes the checkpoint inline under `"checkpoint"` (omitted when absent).
+- **`list_tasks`** items include a `has_checkpoint` boolean; the CLI `task list` table shows a `CHK` column marked `*` for tasks with a checkpoint.
 
 ## Vector / RAG Setup
 

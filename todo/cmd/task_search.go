@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/csams/todo/model"
 	"github.com/spf13/cobra"
 )
 
@@ -20,7 +21,11 @@ var taskSearchCmd = &cobra.Command{
 			return err
 		}
 
-		outputTaskList(tasks)
+		items := make([]model.TaskListItem, len(tasks))
+		for i := range tasks {
+			items[i] = model.TaskListItem{Task: tasks[i]}
+		}
+		outputTaskList(items)
 		return nil
 	},
 }

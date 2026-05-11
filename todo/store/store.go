@@ -14,7 +14,7 @@ type Store interface {
 	CreateTask(ctx context.Context, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
 	CreateSubtask(ctx context.Context, parentID uint, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
 	GetTask(ctx context.Context, id uint) (*model.TaskDetail, error)
-	ListTasks(ctx context.Context, opts ListTasksOptions) ([]model.Task, error)
+	ListTasks(ctx context.Context, opts ListTasksOptions) ([]model.TaskListItem, error)
 	UpdateTask(ctx context.Context, id uint, opts UpdateTaskOptions) (*model.Task, error)
 	SetTaskState(ctx context.Context, id uint, state model.TaskState) (*model.Task, error) // non-Blocked only; Blocked returns ErrInvalidState
 	AddBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error)
@@ -40,6 +40,11 @@ type Store interface {
 	UpdateLink(ctx context.Context, taskID, linkID uint, opts UpdateLinkOptions) (*model.Link, error)
 	ListLinks(ctx context.Context, taskID uint) ([]model.Link, error)
 	DeleteLink(ctx context.Context, taskID uint, linkID uint) error
+
+	// Checkpoints — singleton per task ("resume here" bookmark).
+	GetCheckpoint(ctx context.Context, taskID uint) (*model.Checkpoint, error)
+	SetCheckpoint(ctx context.Context, taskID uint, opts SetCheckpointOptions) (*model.Checkpoint, error)
+	DeleteCheckpoint(ctx context.Context, taskID uint) error
 
 	// Notes — taskID nil means standalone (no parent task).
 	AddNote(ctx context.Context, taskID *uint, text string) (*model.Note, error)
@@ -79,6 +84,15 @@ type UpdateNoteOptions struct {
 type DeleteTaskOptions struct {
 	Recursive   bool
 	DeleteNotes bool // false = orphan notes (set task_id=NULL); true = hard-delete notes
+}
+
+// SetCheckpointOptions holds the fields for SetCheckpoint (upsert).
+// Recap and NextSteps are required (non-empty after sanitize). OpenThreads
+// is optional and may be empty.
+type SetCheckpointOptions struct {
+	Recap       string
+	NextSteps   string
+	OpenThreads string
 }
 
 // UpdateLinkOptions holds optional fields for updating a link.

@@ -633,7 +633,7 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 					return fmt.Errorf("deleting prior task chunks: %w", err)
 				}
 			}
-			chunks := buildTaskChunks(t)
+			chunks := buildTaskChunks(t.Task)
 			for _, c := range chunks {
 				texts = append(texts, c.Text)
 				docs = append(docs, vectorstore.Document{

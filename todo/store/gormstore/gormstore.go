@@ -19,7 +19,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const maxBulkIDs       = 100
+const maxBulkIDs = 100
 const defaultQueryLimit = 200
 
 var tagRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -44,6 +44,7 @@ func New(db *gorm.DB) (*GormStore, error) {
 		&model.TaskTag{},
 		&model.Link{},
 		&model.Note{},
+		&model.Checkpoint{},
 	); err != nil {
 		return nil, fmt.Errorf("automigrate: %w", err)
 	}
@@ -282,6 +283,48 @@ func validateNoteText(text string) (string, error) {
 	}
 	if utf8.RuneCountInString(clean) > 50000 {
 		return "", &model.ValidationError{Field: "text", Message: "max 50000 characters"}
+	}
+	return clean, nil
+}
+
+func validateCheckpointRecap(text string) (string, error) {
+	clean, err := textutil.Sanitize(text)
+	if err != nil {
+		return "", &model.ValidationError{Field: "recap", Message: err.Error()}
+	}
+	if clean == "" {
+		return "", &model.ValidationError{Field: "recap", Message: "required and non-empty"}
+	}
+	if utf8.RuneCountInString(clean) > 10000 {
+		return "", &model.ValidationError{Field: "recap", Message: "max 10000 characters"}
+	}
+	return clean, nil
+}
+
+func validateCheckpointNextSteps(text string) (string, error) {
+	clean, err := textutil.Sanitize(text)
+	if err != nil {
+		return "", &model.ValidationError{Field: "next_steps", Message: err.Error()}
+	}
+	if clean == "" {
+		return "", &model.ValidationError{Field: "next_steps", Message: "required and non-empty"}
+	}
+	if utf8.RuneCountInString(clean) > 10000 {
+		return "", &model.ValidationError{Field: "next_steps", Message: "max 10000 characters"}
+	}
+	return clean, nil
+}
+
+func validateCheckpointOpenThreads(text string) (string, error) {
+	if text == "" {
+		return "", nil
+	}
+	clean, err := textutil.Sanitize(text)
+	if err != nil {
+		return "", &model.ValidationError{Field: "open_threads", Message: err.Error()}
+	}
+	if utf8.RuneCountInString(clean) > 10000 {
+		return "", &model.ValidationError{Field: "open_threads", Message: "max 10000 characters"}
 	}
 	return clean, nil
 }
@@ -655,6 +698,7 @@ func (s *GormStore) GetTask(ctx context.Context, id uint) (*model.TaskDetail, er
 		Preload("Links").
 		Preload("Children").
 		Preload("Parent").
+		Preload("Checkpoint").
 		First(&task, id).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -683,7 +727,7 @@ func (s *GormStore) GetTask(ctx context.Context, id uint) (*model.TaskDetail, er
 	}, nil
 }
 
-func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) ([]model.Task, error) {
+func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) ([]model.TaskListItem, error) {
 	db := s.db.WithContext(ctx)
 	q := db.Model(&model.Task{}).Preload("Tags")
 
@@ -780,7 +824,31 @@ func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) 
 	if err := q.Find(&tasks).Error; err != nil {
 		return nil, err
 	}
-	return tasks, nil
+
+	items := make([]model.TaskListItem, len(tasks))
+	for i := range tasks {
+		items[i] = model.TaskListItem{Task: tasks[i]}
+	}
+	if len(tasks) > 0 {
+		taskIDs := make([]uint, len(tasks))
+		for i := range tasks {
+			taskIDs[i] = tasks[i].ID
+		}
+		var withCheckpoint []uint
+		if err := db.Model(&model.Checkpoint{}).
+			Where("task_id IN ?", taskIDs).
+			Pluck("task_id", &withCheckpoint).Error; err != nil {
+			return nil, err
+		}
+		set := make(map[uint]bool, len(withCheckpoint))
+		for _, id := range withCheckpoint {
+			set[id] = true
+		}
+		for i := range items {
+			items[i].HasCheckpoint = set[items[i].ID]
+		}
+	}
+	return items, nil
 }
 
 func (s *GormStore) UpdateTask(ctx context.Context, id uint, opts store.UpdateTaskOptions) (*model.Task, error) {
@@ -1354,6 +1422,9 @@ func (s *GormStore) deleteTaskData(tx *gorm.DB, taskID uint, deleteNotes bool) (
 		return nil, nil, err
 	}
 	if err := tx.Where("task_id = ? OR blocker_id = ?", taskID, taskID).Delete(&model.TaskBlocker{}).Error; err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Where("task_id = ?", taskID).Delete(&model.Checkpoint{}).Error; err != nil {
 		return nil, nil, err
 	}
 	return orphanedNoteIDs, deletedNoteIDs, nil
@@ -2046,6 +2117,165 @@ func (s *GormStore) ArchiveNote(ctx context.Context, noteID uint, archived bool)
 	}
 	s.emit(ctx, event)
 
+	return nil
+}
+
+// --- Checkpoints ---
+
+func (s *GormStore) GetCheckpoint(ctx context.Context, taskID uint) (*model.Checkpoint, error) {
+	if err := validateID(taskID); err != nil {
+		return nil, err
+	}
+	db := s.db.WithContext(ctx)
+	if _, err := s.taskExists(db, taskID); err != nil {
+		return nil, err
+	}
+	var cp model.Checkpoint
+	if err := db.Where("task_id = ?", taskID).First(&cp).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("checkpoint for task %d: %w", taskID, model.ErrNotFound)
+		}
+		return nil, err
+	}
+	return &cp, nil
+}
+
+func (s *GormStore) SetCheckpoint(ctx context.Context, taskID uint, opts store.SetCheckpointOptions) (*model.Checkpoint, error) {
+	if err := validateID(taskID); err != nil {
+		return nil, err
+	}
+	cleanRecap, err := validateCheckpointRecap(opts.Recap)
+	if err != nil {
+		return nil, err
+	}
+	cleanNext, err := validateCheckpointNextSteps(opts.NextSteps)
+	if err != nil {
+		return nil, err
+	}
+	cleanOpen, err := validateCheckpointOpenThreads(opts.OpenThreads)
+	if err != nil {
+		return nil, err
+	}
+
+	db := s.db.WithContext(ctx)
+	var cp model.Checkpoint
+	var changes map[string]store.Change
+	var eventType string
+
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.taskExistsActive(tx, taskID); err != nil {
+			return err
+		}
+
+		// Resolve insert vs update by attempting an INSERT first. The unique
+		// index on task_id makes this race-safe across both SQLite and
+		// Postgres — a concurrent caller's INSERT will fail with a duplicate
+		// key error, after which we fall through to the UPDATE path.
+		cp = model.Checkpoint{
+			TaskID:      taskID,
+			Recap:       cleanRecap,
+			NextSteps:   cleanNext,
+			OpenThreads: cleanOpen,
+		}
+		createErr := tx.Create(&cp).Error
+		if createErr == nil {
+			eventType = "checkpoint.created"
+			return nil
+		}
+		if !isUniqueViolation(createErr) {
+			return createErr
+		}
+
+		// A row already exists — load it, compute the diff, and update only
+		// if at least one field actually changed.
+		var existing model.Checkpoint
+		if err := tx.Where("task_id = ?", taskID).First(&existing).Error; err != nil {
+			return err
+		}
+		changes = map[string]store.Change{}
+		if existing.Recap != cleanRecap {
+			changes["recap"] = store.Change{Old: existing.Recap, New: cleanRecap}
+		}
+		if existing.NextSteps != cleanNext {
+			changes["next_steps"] = store.Change{Old: existing.NextSteps, New: cleanNext}
+		}
+		if existing.OpenThreads != cleanOpen {
+			changes["open_threads"] = store.Change{Old: existing.OpenThreads, New: cleanOpen}
+		}
+		if len(changes) == 0 {
+			// No-op: nothing to update and no event to emit.
+			cp = existing
+			return nil
+		}
+		updates := map[string]any{
+			"recap":        cleanRecap,
+			"next_steps":   cleanNext,
+			"open_threads": cleanOpen,
+		}
+		if err := tx.Model(&existing).Updates(updates).Error; err != nil {
+			return err
+		}
+		// Reload to capture the bumped UpdatedAt.
+		if err := tx.Where("task_id = ?", taskID).First(&cp).Error; err != nil {
+			return err
+		}
+		eventType = "checkpoint.updated"
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if eventType != "" {
+		event := store.StoreEvent{
+			Type:    eventType,
+			TaskIDs: []uint{taskID},
+		}
+		if eventType == "checkpoint.updated" {
+			event.Changes = changes
+		}
+		s.emit(ctx, event)
+	}
+	return &cp, nil
+}
+
+// isUniqueViolation returns true if err is a duplicate-key error from a
+// unique-index violation. Detects both SQLite and Postgres error text.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint failed") || // SQLite
+		strings.Contains(s, "duplicate key value violates unique constraint") || // Postgres
+		strings.Contains(s, "SQLSTATE 23505") // Postgres pq error
+}
+
+func (s *GormStore) DeleteCheckpoint(ctx context.Context, taskID uint) error {
+	if err := validateID(taskID); err != nil {
+		return err
+	}
+	db := s.db.WithContext(ctx)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.taskExists(tx, taskID); err != nil {
+			return err
+		}
+		res := tx.Where("task_id = ?", taskID).Delete(&model.Checkpoint{})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("checkpoint for task %d: %w", taskID, model.ErrNotFound)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.emit(ctx, store.StoreEvent{
+		Type:    "checkpoint.deleted",
+		TaskIDs: []uint{taskID},
+	})
 	return nil
 }
 

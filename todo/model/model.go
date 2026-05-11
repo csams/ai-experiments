@@ -50,12 +50,13 @@ type Task struct {
 	ParentID    *uint      `json:"parent_id,omitempty"`
 	VectorDirty bool       `gorm:"not null;default:false" json:"-"`
 
-	Parent   *Task     `gorm:"foreignKey:ParentID" json:"parent,omitempty"`
-	Children []Task    `gorm:"foreignKey:ParentID" json:"children,omitempty"`
-	Blockers []Task    `gorm:"many2many:task_blockers;joinForeignKey:TaskID;joinReferences:BlockerID" json:"blockers,omitempty"`
-	Tags     []TaskTag `gorm:"foreignKey:TaskID" json:"tags,omitempty"`
-	Links    []Link    `gorm:"constraint:OnDelete:CASCADE" json:"links,omitempty"`
-	Notes    []Note    `gorm:"foreignKey:TaskID;constraint:OnDelete:SET NULL" json:"notes,omitempty"`
+	Parent     *Task       `gorm:"foreignKey:ParentID" json:"parent,omitempty"`
+	Children   []Task      `gorm:"foreignKey:ParentID" json:"children,omitempty"`
+	Blockers   []Task      `gorm:"many2many:task_blockers;joinForeignKey:TaskID;joinReferences:BlockerID" json:"blockers,omitempty"`
+	Tags       []TaskTag   `gorm:"foreignKey:TaskID" json:"tags,omitempty"`
+	Links      []Link      `gorm:"constraint:OnDelete:CASCADE" json:"links,omitempty"`
+	Notes      []Note      `gorm:"foreignKey:TaskID;constraint:OnDelete:SET NULL" json:"notes,omitempty"`
+	Checkpoint *Checkpoint `gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE" json:"checkpoint,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -65,6 +66,12 @@ type Task struct {
 type TaskDetail struct {
 	Task
 	Blocking []Task `json:"blocking"` // tasks this one is blocking (computed, not stored)
+}
+
+// TaskListItem is Task plus lightweight derived fields surfaced in list_tasks.
+type TaskListItem struct {
+	Task
+	HasCheckpoint bool `json:"has_checkpoint"`
 }
 
 // TaskBlocker is the join table for the many-to-many blocking relationship.
@@ -87,6 +94,17 @@ type Link struct {
 	URL         string    `gorm:"not null;size:2000" json:"url"`
 	Description string    `gorm:"size:1000" json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// Checkpoint is a singleton "resume here" bookmark per task. At most one per task.
+type Checkpoint struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	TaskID      uint      `gorm:"not null;uniqueIndex" json:"task_id"`
+	Recap       string    `gorm:"not null" json:"recap"`
+	NextSteps   string    `gorm:"not null" json:"next_steps"`
+	OpenThreads string    `json:"open_threads"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Note is a free-text annotation. May be attached to a task (TaskID set) or standalone (TaskID nil).

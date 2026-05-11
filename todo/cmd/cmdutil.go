@@ -58,7 +58,7 @@ func outputTaskUpdated(task *model.Task) {
 }
 
 // outputTaskList prints a list of tasks as a table.
-func outputTaskList(tasks []model.Task) {
+func outputTaskList(tasks []model.TaskListItem) {
 	if jsonOutput {
 		outputJSON(tasks)
 		return
@@ -69,7 +69,7 @@ func outputTaskList(tasks []model.Task) {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tPRI\tSTATE\tDUE\tPARENT\tTITLE\tTAGS")
+	fmt.Fprintln(w, "ID\tPRI\tSTATE\tDUE\tPARENT\tCHK\tTITLE\tTAGS")
 	for _, t := range tasks {
 		due := ""
 		if t.DueAt != nil {
@@ -82,14 +82,18 @@ func outputTaskList(tasks []model.Task) {
 		if t.ParentID != nil {
 			parent = fmt.Sprintf("%d", *t.ParentID)
 		}
+		chk := ""
+		if t.HasCheckpoint {
+			chk = "*"
+		}
 		title := textutil.TruncateRunes(t.Title, 50, "...")
 		tags := tagNames(t.Tags)
 		archived := ""
 		if t.Archived {
 			archived = " [archived]"
 		}
-		fmt.Fprintf(w, "%d\t%d\t%s%s\t%s\t%s\t%s\t%s\n",
-			t.ID, t.Priority, t.State, archived, due, parent, title, tags)
+		fmt.Fprintf(w, "%d\t%d\t%s%s\t%s\t%s\t%s\t%s\t%s\n",
+			t.ID, t.Priority, t.State, archived, due, parent, chk, title, tags)
 	}
 	w.Flush()
 }
@@ -120,6 +124,14 @@ func outputTaskDetail(detail *model.TaskDetail) {
 	}
 	if t.Description != "" {
 		fmt.Printf("  Description: %s\n", t.Description)
+	}
+	if t.Checkpoint != nil {
+		fmt.Printf("\n  Checkpoint (updated %s):\n", t.Checkpoint.UpdatedAt.Format("2006-01-02 15:04"))
+		fmt.Printf("    Recap: %s\n", t.Checkpoint.Recap)
+		fmt.Printf("    Next:  %s\n", t.Checkpoint.NextSteps)
+		if t.Checkpoint.OpenThreads != "" {
+			fmt.Printf("    Open:  %s\n", t.Checkpoint.OpenThreads)
+		}
 	}
 	fmt.Printf("  Created:  %s\n", t.CreatedAt.Format(time.RFC3339))
 	fmt.Printf("  Updated:  %s\n", t.UpdatedAt.Format(time.RFC3339))

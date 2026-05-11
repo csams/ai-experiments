@@ -19,6 +19,7 @@ func NewServer(s store.Store, ss store.SemanticSearcher) *server.MCPServer {
 	registerTaskTools(srv, s)
 	registerNoteTools(srv, s)
 	registerLinkTools(srv, s)
+	registerCheckpointTools(srv, s)
 	registerTagTools(srv, s)
 	registerBulkTools(srv, s)
 
