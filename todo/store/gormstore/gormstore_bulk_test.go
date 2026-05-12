@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/csams/todo/model"
+	"github.com/csams/todo/store"
 )
 
 // --- BulkUpdateState ---
@@ -41,7 +42,7 @@ func TestBulkUpdateState_DoneCascadeUnblocks(t *testing.T) {
 		t.Fatalf("bulk update state: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), blocked.ID)
+	detail, _ := s.GetTask(ctx(), blocked.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.State != model.StateUnblocked {
 		t.Errorf("expected blocked task to be Unblocked, got %s", detail.State)
 	}
@@ -145,7 +146,7 @@ func TestBulkUpdatePriority_PropagatesUp(t *testing.T) {
 		t.Fatalf("bulk update priority: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), a.ID)
+	detail, _ := s.GetTask(ctx(), a.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.Priority != 0 {
 		t.Errorf("expected blocker priority to be promoted to 0, got %d", detail.Priority)
 	}
@@ -163,8 +164,8 @@ func TestBulkAddTags_Basic(t *testing.T) {
 		t.Fatalf("bulk add tags: %v", err)
 	}
 
-	detailA, _ := s.GetTask(ctx(), a.ID)
-	detailB, _ := s.GetTask(ctx(), b.ID)
+	detailA, _ := s.GetTask(ctx(), a.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	detailB, _ := s.GetTask(ctx(), b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if len(detailA.Tags) != 2 {
 		t.Errorf("task A: expected 2 tags, got %d", len(detailA.Tags))
 	}
@@ -183,7 +184,7 @@ func TestBulkAddTags_Idempotent(t *testing.T) {
 		t.Fatalf("bulk add tags (idempotent): %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), 1)
+	detail, _ := s.GetTask(ctx(), 1, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if len(detail.Tags) != 1 {
 		t.Errorf("expected 1 tag after idempotent add, got %d", len(detail.Tags))
 	}
@@ -231,8 +232,8 @@ func TestBulkRemoveTags_Basic(t *testing.T) {
 		t.Fatalf("bulk remove tags: %v", err)
 	}
 
-	detailA, _ := s.GetTask(ctx(), 1)
-	detailB, _ := s.GetTask(ctx(), 2)
+	detailA, _ := s.GetTask(ctx(), 1, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	detailB, _ := s.GetTask(ctx(), 2, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	for _, d := range []model.Task{detailA.Task, detailB.Task} {
 		if len(d.Tags) != 1 {
 			t.Errorf("task %d: expected 1 tag remaining, got %d", d.ID, len(d.Tags))

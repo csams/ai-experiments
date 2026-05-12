@@ -22,8 +22,8 @@ func TestCreateSubtask(t *testing.T) {
 	if child.Title != "Child" {
 		t.Errorf("title = %q, want %q", child.Title, "Child")
 	}
-	if child.Description != "desc" {
-		t.Errorf("description = %q, want %q", child.Description, "desc")
+	if d := model.DerefStr(child.Description); d != "desc" {
+		t.Errorf("description = %q, want %q", d, "desc")
 	}
 	if child.Priority != 1 {
 		t.Errorf("priority = %d, want 1", child.Priority)
@@ -32,7 +32,7 @@ func TestCreateSubtask(t *testing.T) {
 		t.Errorf("tags = %v, want [tag1]", child.Tags)
 	}
 
-	detail, _ := s.GetTask(ctx(), parent.ID)
+	detail, _ := s.GetTask(ctx(), parent.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if len(detail.Children) != 1 || detail.Children[0].ID != child.ID {
 		t.Errorf("parent children = %v, want [%d]", detail.Children, child.ID)
 	}
@@ -99,7 +99,7 @@ func TestSetParent_Basic(t *testing.T) {
 		t.Fatalf("set parent: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), parent.ID)
+	detail, _ := s.GetTask(ctx(), parent.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if len(detail.Children) != 1 || detail.Children[0].ID != child.ID {
 		t.Errorf("children = %v, want [%d]", detail.Children, child.ID)
 	}
@@ -115,7 +115,7 @@ func TestSetParent_Unparent(t *testing.T) {
 		t.Fatalf("unparent: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), child.ID)
+	detail, _ := s.GetTask(ctx(), child.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.ParentID != nil {
 		t.Error("expected nil parent_id")
 	}
@@ -161,7 +161,7 @@ func TestDeleteTask_PromotesSubtasks(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), child.ID)
+	detail, _ := s.GetTask(ctx(), child.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.ParentID != nil {
 		t.Error("expected child to be promoted to top-level")
 	}
@@ -180,7 +180,7 @@ func TestDeleteTask_Recursive(t *testing.T) {
 	}
 
 	for _, id := range []uint{parent.ID, child.ID, grandchild.ID} {
-		_, err := s.GetTask(ctx(), id)
+		_, err := s.GetTask(ctx(), id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 		if !errors.Is(err, model.ErrNotFound) {
 			t.Errorf("task %d should be deleted", id)
 		}

@@ -61,7 +61,7 @@ func TestCreateTask_EmptyTitle(t *testing.T) {
 
 func TestGetTask_NotFound(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.GetTask(ctx(), 999)
+	_, err := s.GetTask(ctx(), 999, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -74,7 +74,7 @@ func TestGetTask_WithDetails(t *testing.T) {
 	s.AddNote(ctx(), &task.ID, "a note")
 	s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-123", "")
 
-	detail, err := s.GetTask(ctx(), task.ID)
+	detail, err := s.GetTask(ctx(), task.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestGetTask_ComputesBlockingList(t *testing.T) {
 	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 
-	detail, err := s.GetTask(ctx(), a.ID)
+	detail, err := s.GetTask(ctx(), a.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestDeleteTask_CascadesNotesLinksTagsBlockers(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 
-	_, err := s.GetTask(ctx(), task.ID)
+	_, err := s.GetTask(ctx(), task.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("expected ErrNotFound after delete, got %v", err)
 	}
@@ -454,7 +454,7 @@ func TestTags_AddRemoveIdempotent(t *testing.T) {
 		t.Fatalf("add tags again: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), task.ID)
+	detail, _ := s.GetTask(ctx(), task.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if len(detail.Tags) != 2 {
 		t.Errorf("tags = %d, want 2", len(detail.Tags))
 	}
@@ -462,7 +462,7 @@ func TestTags_AddRemoveIdempotent(t *testing.T) {
 	if err := s.RemoveTags(ctx(), task.ID, []string{"a"}); err != nil {
 		t.Fatalf("remove tags: %v", err)
 	}
-	detail, _ = s.GetTask(ctx(), task.ID)
+	detail, _ = s.GetTask(ctx(), task.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if len(detail.Tags) != 1 {
 		t.Errorf("tags after remove = %d, want 1", len(detail.Tags))
 	}

@@ -13,7 +13,7 @@ type Store interface {
 	// Tasks
 	CreateTask(ctx context.Context, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
 	CreateSubtask(ctx context.Context, parentID uint, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
-	GetTask(ctx context.Context, id uint) (*model.TaskDetail, error)
+	GetTask(ctx context.Context, id uint, opts GetTaskOptions) (*model.TaskDetail, error)
 	ListTasks(ctx context.Context, opts ListTasksOptions) ([]model.TaskListItem, error)
 	UpdateTask(ctx context.Context, id uint, opts UpdateTaskOptions) (*model.Task, error)
 	SetTaskState(ctx context.Context, id uint, state model.TaskState) (*model.Task, error) // non-Blocked only; Blocked returns ErrInvalidState
@@ -57,6 +57,14 @@ type Store interface {
 
 	// Lifecycle
 	Close(ctx context.Context) error
+}
+
+// GetTaskOptions controls which optional fields GetTask loads.
+// Empty Include means cheap fields only: id, title, priority, state, archived,
+// due_at, parent_id, created_at, updated_at, tags, checkpoint. Opt-in keys:
+// "description", "notes", "links", "parent", "children", "blockers", "blocking".
+type GetTaskOptions struct {
+	Include map[string]bool
 }
 
 // UpdateTaskOptions holds optional fields for updating a task.
@@ -129,6 +137,11 @@ type ListTasksOptions struct {
 
 	// Tag subset filter
 	TagsSubsetOf []string // task's tags must all be within this set
+
+	// Optional opt-in fields per item. Empty means cheap fields only
+	// (id, title, priority, state, archived, due_at, parent_id, timestamps,
+	// tags). Opt-in keys match the list_tasks include enum.
+	Include map[string]bool
 }
 
 // StoreEvent is emitted by the store after successful mutations.

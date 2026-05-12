@@ -4,12 +4,24 @@ import (
 	"context"
 	"testing"
 
+	"github.com/csams/todo/model"
 	"github.com/csams/todo/store"
 	"github.com/csams/todo/store/gormstore"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+// getTaskAll fetches a task with every opt-in field loaded — preserves the
+// pre-projection get_task behavior for tests written before the Include API.
+func getTaskAll(t *testing.T, s *gormstore.GormStore, c context.Context, id uint) *model.TaskDetail {
+	t.Helper()
+	detail, err := s.GetTask(c, id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	if err != nil {
+		t.Fatalf("GetTask(%d): %v", id, err)
+	}
+	return detail
+}
 
 // recordingObserver captures every StoreEvent it receives. Tests use it to
 // assert that mutations emit (or do not emit) events.

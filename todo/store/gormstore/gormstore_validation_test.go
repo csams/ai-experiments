@@ -12,7 +12,7 @@ import (
 
 func TestValidation_IDZero(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.GetTask(ctx(), 0)
+	_, err := s.GetTask(ctx(), 0, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("expected ValidationError for ID=0, got %T: %v", err, err)
@@ -36,8 +36,8 @@ func TestValidation_LongDescriptionAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for long description, got %v", err)
 	}
-	if task.Description != longDesc {
-		t.Errorf("expected description to be preserved, got length %d", len(task.Description))
+	if d := model.DerefStr(task.Description); d != longDesc {
+		t.Errorf("expected description to be preserved, got length %d", len(d))
 	}
 }
 
@@ -284,7 +284,7 @@ func TestValidation_UpdateTaskNFCNormalization(t *testing.T) {
 	}
 
 	// Read back via GetTask to verify storage
-	detail, err := s.GetTask(ctx(), task.ID)
+	detail, err := s.GetTask(ctx(), task.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestValidation_NFCTitleReadBack(t *testing.T) {
 	want := "caf\u00e9"
 
 	// Read back from DB to verify NFC storage
-	detail, err := s.GetTask(ctx(), task.ID)
+	detail, err := s.GetTask(ctx(), task.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

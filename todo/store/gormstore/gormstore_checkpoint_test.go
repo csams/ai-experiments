@@ -198,7 +198,7 @@ func TestCheckpoint_GetTaskIncludesCheckpoint(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	detail, err := s.GetTask(ctx(), task.ID)
+	detail, err := s.GetTask(ctx(), task.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if err != nil {
 		t.Fatalf("get task: %v", err)
 	}

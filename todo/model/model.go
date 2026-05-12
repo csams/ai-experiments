@@ -42,7 +42,7 @@ var ValidLinkTypes = map[LinkType]bool{
 type Task struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
 	Title       string     `gorm:"not null;size:512" json:"title"`
-	Description string     `json:"description,omitempty"`
+	Description *string    `json:"description,omitempty"`
 	Priority    int        `gorm:"not null;default:0" json:"priority"`
 	State       TaskState  `gorm:"not null;default:'New';size:20" json:"state"`
 	Archived    bool       `gorm:"not null;default:false" json:"archived"`
@@ -65,7 +65,7 @@ type Task struct {
 // TaskDetail is the enriched return type for GetTask, including computed blocking list.
 type TaskDetail struct {
 	Task
-	Blocking []Task `json:"blocking"` // tasks this one is blocking (computed, not stored)
+	Blocking []Task `json:"blocking,omitempty"` // tasks this one is blocking (computed, not stored)
 }
 
 // TaskListItem is Task plus lightweight derived fields surfaced in list_tasks.

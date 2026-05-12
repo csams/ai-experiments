@@ -122,7 +122,9 @@ func (v *VectorSyncer) embedTasks(ctx context.Context, taskIDs []uint) error {
 	var texts []string
 
 	for _, tid := range taskIDs {
-		detail, err := v.store.GetTask(ctx, tid)
+		detail, err := v.store.GetTask(ctx, tid, store.GetTaskOptions{
+			Include: map[string]bool{"description": true, "links": true},
+		})
 		if err != nil {
 			continue // task may have been deleted
 		}
@@ -197,7 +199,7 @@ func (v *VectorSyncer) embedNotes(ctx context.Context, noteIDs []uint) error {
 		if missingCache[taskID] {
 			return parentInfo{}, false
 		}
-		detail, err := v.store.GetTask(ctx, taskID)
+		detail, err := v.store.GetTask(ctx, taskID, store.GetTaskOptions{})
 		if err != nil {
 			missingCache[taskID] = true
 			return parentInfo{}, false
@@ -344,7 +346,7 @@ func buildTaskChunks(t model.Task) []chunkInput {
 	header := buildTaskHeader(t)
 	headerWithSep := header + ". "
 
-	desc := strings.TrimSpace(t.Description)
+	desc := strings.TrimSpace(model.DerefStr(t.Description))
 	if desc == "" {
 		return []chunkInput{{Text: header, ChunkIndex: 0}}
 	}
@@ -434,16 +436,18 @@ func (v *VectorSyncer) SemanticSearch(ctx context.Context, query string, opts st
 
 func (v *VectorSyncer) SemanticSearchContext(ctx context.Context, taskID uint, opts store.SemanticSearchOptions) ([]store.SemanticSearchResult, error) {
 	// Aggregate task text + all note texts into a single query
-	detail, err := v.store.GetTask(ctx, taskID)
+	detail, err := v.store.GetTask(ctx, taskID, store.GetTaskOptions{
+		Include: map[string]bool{"description": true, "notes": true, "links": true},
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	var b strings.Builder
 	b.WriteString(detail.Title)
-	if detail.Description != "" {
+	if d := model.DerefStr(detail.Description); d != "" {
 		b.WriteString(". ")
-		b.WriteString(detail.Description)
+		b.WriteString(d)
 	}
 	for _, l := range detail.Links {
 		if l.Description != "" {
@@ -581,10 +585,12 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		}
 	}
 
-	// Fetch all tasks
+	// Fetch all tasks. Reindex embeds description + tags + links into chunks,
+	// so opt description and links in here. Tags are always loaded by ListTasks.
 	tasks, err := v.store.ListTasks(ctx, store.ListTasksOptions{
 		IncludeArchived: true,
 		IncludeSubtasks: true,
+		Include:         map[string]bool{"description": true, "links": true},
 	})
 	if err != nil {
 		return fmt.Errorf("listing tasks: %w", err)
@@ -621,11 +627,6 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		var docs []vectorstore.Document
 		var texts []string
 		for _, t := range batch {
-			// ListTasks only preloads Tags; load Links so their descriptions
-			// land in the embedding text.
-			if links, err := v.store.ListLinks(ctx, t.ID); err == nil {
-				t.Links = links
-			}
 			// Without --clear we still need to drop any stale chunks from a prior
 			// indexing; chunk counts may have shrunk.
 			if !clear {

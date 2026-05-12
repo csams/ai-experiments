@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/csams/todo/model"
@@ -190,4 +191,34 @@ func toJSON(v any) string {
 		return fmt.Sprintf(`{"error": "marshal failed: %s"}`, err.Error())
 	}
 	return string(b)
+}
+
+// resolveTaskIncludes parses the optional "include" array argument and
+// normalizes it into a set. nil/empty returns an empty set (default minimal).
+// "*" expands to all keys in `allowed`. Unknown values produce an error.
+// Case-sensitive (matches the schema's Enum validation).
+func resolveTaskIncludes(req mcpgo.CallToolRequest, allowed []string) (map[string]bool, error) {
+	raw := getStrSlice(req, "include")
+	if len(raw) == 0 {
+		return map[string]bool{}, nil
+	}
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		allowedSet[k] = true
+	}
+	set := make(map[string]bool, len(raw))
+	for _, v := range raw {
+		if v == "*" {
+			for _, k := range allowed {
+				set[k] = true
+			}
+			continue
+		}
+		if !allowedSet[v] {
+			return nil, fmt.Errorf("invalid include value %q (valid: *, %s)",
+				v, strings.Join(allowed, ", "))
+		}
+		set[v] = true
+	}
+	return set, nil
 }

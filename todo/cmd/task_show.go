@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"github.com/csams/todo/model"
+	"github.com/csams/todo/store"
 	"github.com/spf13/cobra"
 )
 
@@ -20,7 +22,7 @@ var taskShowCmd = &cobra.Command{
 			return err
 		}
 
-		detail, err := s.GetTask(cmd.Context(), id)
+		detail, err := s.GetTask(cmd.Context(), id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 		if err != nil {
 			return err
 		}

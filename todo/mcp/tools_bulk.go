@@ -13,7 +13,9 @@ const maxBulkMCPIDs = 100
 
 func registerBulkTools(srv *server.MCPServer, s store.Store) {
 	srv.AddTool(mcpgo.NewTool("bulk_update_state",
-		mcpgo.WithDescription("Set state on multiple tasks (max 100) atomically. Processes in ID order. Done cascades unblocks. Returns updated tasks."),
+		mcpgo.WithDescription("Set state on multiple tasks (max 100) atomically. Processes in ID order. " +
+			"Done cascades unblocks. Returns updated tasks. " +
+			"Empty descriptions are omitted from each task's JSON response."),
 		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 		mcpgo.WithString("state", mcpgo.Required(), mcpgo.Description("Target state"), mcpgo.Enum("New", "Progressing", "Unblocked", "Done")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -36,7 +38,9 @@ func registerBulkTools(srv *server.MCPServer, s store.Store) {
 	})
 
 	srv.AddTool(mcpgo.NewTool("bulk_update_priority",
-		mcpgo.WithDescription("Set priority on multiple tasks (max 100) atomically. Blockers are promoted to at least match the priority of tasks they block. Returns updated tasks."),
+		mcpgo.WithDescription("Set priority on multiple tasks (max 100) atomically. " +
+			"Blockers are promoted to at least match the priority of tasks they block. Returns updated tasks. " +
+			"Empty descriptions are omitted from each task's JSON response."),
 		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 		mcpgo.WithNumber("priority", mcpgo.Required(), mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

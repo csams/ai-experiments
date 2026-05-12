@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/csams/todo/model"
+	"github.com/csams/todo/store"
 )
 
 func TestSetTaskState_Progressing(t *testing.T) {
@@ -53,7 +54,7 @@ func TestSetTaskState_ClearsBlockerEntries(t *testing.T) {
 		t.Fatalf("set state: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), b.ID)
+	detail, _ := s.GetTask(ctx(), b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if len(detail.Blockers) != 0 {
 		t.Errorf("blockers after state change = %d, want 0", len(detail.Blockers))
 	}
@@ -71,7 +72,7 @@ func TestSetTaskState_DoneCascadeUnblocks(t *testing.T) {
 		t.Fatalf("set done: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), b.ID)
+	detail, _ := s.GetTask(ctx(), b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.State != model.StateUnblocked {
 		t.Errorf("B state = %q, want %q", detail.State, model.StateUnblocked)
 	}
@@ -108,7 +109,7 @@ func TestAddBlockers_MultipleBlockers(t *testing.T) {
 	// Complete A — C should still be Blocked (B still blocks it)
 	s.SetTaskState(ctx(), a.ID, model.StateDone)
 
-	detail, _ := s.GetTask(ctx(), c.ID)
+	detail, _ := s.GetTask(ctx(), c.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.State != model.StateBlocked {
 		t.Errorf("C state = %q, want %q (B still blocks)", detail.State, model.StateBlocked)
 	}
@@ -116,7 +117,7 @@ func TestAddBlockers_MultipleBlockers(t *testing.T) {
 	// Complete B — C should now be Unblocked
 	s.SetTaskState(ctx(), b.ID, model.StateDone)
 
-	detail, _ = s.GetTask(ctx(), c.ID)
+	detail, _ = s.GetTask(ctx(), c.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.State != model.StateUnblocked {
 		t.Errorf("C state = %q, want %q", detail.State, model.StateUnblocked)
 	}

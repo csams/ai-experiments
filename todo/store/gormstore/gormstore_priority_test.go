@@ -3,6 +3,7 @@ package gormstore_test
 import (
 	"testing"
 
+	"github.com/csams/todo/model"
 	"github.com/csams/todo/store"
 )
 
@@ -14,7 +15,7 @@ func TestPriority_BlockerAdjustedWhenBlocking(t *testing.T) {
 
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 
-	detail, _ := s.GetTask(ctx(), a.ID)
+	detail, _ := s.GetTask(ctx(), a.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.Priority != 1 {
 		t.Errorf("A priority = %d, want 1 (adjusted to match B)", detail.Priority)
 	}
@@ -35,8 +36,8 @@ func TestPriority_PropagatesUpChain(t *testing.T) {
 	p := 1
 	s.UpdateTask(ctx(), a.ID, store.UpdateTaskOptions{Priority: &p})
 
-	detailB, _ := s.GetTask(ctx(), b.ID)
-	detailC, _ := s.GetTask(ctx(), c.ID)
+	detailB, _ := s.GetTask(ctx(), b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	detailC, _ := s.GetTask(ctx(), c.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 
 	if detailB.Priority != 1 {
 		t.Errorf("B priority = %d, want 1", detailB.Priority)

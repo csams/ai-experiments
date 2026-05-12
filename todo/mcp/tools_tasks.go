@@ -13,7 +13,8 @@ import (
 func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// create_task
 	srv.AddTool(mcpgo.NewTool("create_task",
-		mcpgo.WithDescription("Create a new task. Returns the created task with tags."),
+		mcpgo.WithDescription("Create a new task. Returns the created task with tags. " +
+			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithString("title", mcpgo.Required(), mcpgo.Description("Task title (max 512 chars)"), mcpgo.MaxLength(512)),
 		mcpgo.WithString("description", mcpgo.Description("Task description (max 100000 chars)"), mcpgo.MaxLength(100000)),
 		mcpgo.WithNumber("priority", mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
@@ -44,7 +45,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// create_subtask
 	srv.AddTool(mcpgo.NewTool("create_subtask",
-		mcpgo.WithDescription("Create a subtask under an existing non-archived parent. Returns full task detail including parent info."),
+		mcpgo.WithDescription("Create a subtask under an existing non-archived parent. " +
+			"Returns full task detail including parent info. " +
+			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("parent_id", mcpgo.Required(), mcpgo.Description("Parent task ID"), mcpgo.Min(1)),
 		mcpgo.WithString("title", mcpgo.Required(), mcpgo.Description("Task title (max 512 chars)"), mcpgo.MaxLength(512)),
 		mcpgo.WithString("description", mcpgo.Description("Task description (max 100000 chars)"), mcpgo.MaxLength(100000)),
@@ -76,7 +79,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if err != nil {
 			return errResult(err), nil
 		}
-		detail, err := s.GetTask(ctx, task.ID)
+		detail, err := s.GetTask(ctx, task.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -88,7 +91,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		mcpgo.WithDescription("List tasks with filters and sorting. By default shows only "+
 			"non-archived top-level tasks sorted by priority. Supports filtering by state, "+
 			"due date (range, exact day, or presence), priority range, and tags (superset "+
-			"AND logic or subset containment)."),
+			"AND logic or subset containment). Use `include` to opt into expensive per-item "+
+			"fields (description, notes, links, parent, children, blockers); by default each "+
+			"item carries only cheap bounded fields plus tags and a has_checkpoint flag."),
 		mcpgo.WithString("state", mcpgo.Description("Filter by state"), mcpgo.Enum("New", "Progressing", "Blocked", "Unblocked", "Done")),
 		mcpgo.WithBoolean("include_archived", mcpgo.Description("Include archived tasks")),
 		mcpgo.WithBoolean("include_subtasks", mcpgo.Description("Include subtasks (flat list)")),
@@ -117,7 +122,20 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 				"Combine with 'tags' to require exact tag sets."),
 			mcpgo.WithStringItems(mcpgo.MaxLength(100)),
 			mcpgo.MaxItems(50)),
+		mcpgo.WithArray("include",
+			mcpgo.Description("Optional per-item fields to load. By default each item "+
+				"carries only cheap fields. Choices: description, notes, links, "+
+				"parent, children, blockers. Use \"*\" for all. Note: list_tasks "+
+				"does not load `blocking`."),
+			mcpgo.WithStringItems(mcpgo.Enum(
+				"*", "description", "notes", "links", "parent", "children", "blockers",
+			)),
+			mcpgo.MaxItems(7)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		inc, err := resolveTaskIncludes(req, model.TaskListIncludes)
+		if err != nil {
+			return errResult(err), nil
+		}
 		opts := store.ListTasksOptions{
 			IncludeArchived: getBool(req, "include_archived"),
 			IncludeSubtasks: getBool(req, "include_subtasks"),
@@ -128,6 +146,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 			PriorityMin:     getOptInt(req, "priority_min"),
 			PriorityMax:     getOptInt(req, "priority_max"),
 			TagsSubsetOf:    getStrSlice(req, "tags_subset_of"),
+			Include:         inc,
 		}
 		if stateStr := getStr(req, "state"); stateStr != "" {
 			state := model.TaskState(stateStr)
@@ -139,7 +158,6 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if pid := getUint(req, "parent_id"); pid > 0 {
 			opts.ParentID = &pid
 		}
-		var err error
 		if opts.DueBefore, err = getTime(req, "due_before"); err != nil {
 			return errResult(err), nil
 		}
@@ -159,14 +177,31 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// get_task
 	srv.AddTool(mcpgo.NewTool("get_task",
-		mcpgo.WithDescription("Get full task detail including blockers, blocking, children, notes, links, and tags."),
+		mcpgo.WithDescription("Get a task. By default returns only cheap, bounded fields "+
+			"(id, title, priority, state, archived, due_at, parent_id, timestamps, "+
+			"tags, checkpoint). Use `include` to opt into expensive fields. "+
+			"Pass [\"*\"] for the full payload (description, notes, links, parent, "+
+			"children, blockers, blocking). Empty blocking lists are omitted from "+
+			"the JSON output."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithArray("include",
+			mcpgo.Description("Optional fields to load. Choices: description, notes, "+
+				"links, parent, children, blockers, blocking. Use \"*\" for all."),
+			mcpgo.WithStringItems(mcpgo.Enum(
+				"*", "description", "notes", "links", "parent", "children", "blockers", "blocking",
+			)),
+			mcpgo.MaxItems(8),
+		),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
-		detail, err := s.GetTask(ctx, id)
+		inc, err := resolveTaskIncludes(req, model.TaskIncludes)
+		if err != nil {
+			return errResult(err), nil
+		}
+		detail, err := s.GetTask(ctx, id, store.GetTaskOptions{Include: inc})
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -175,7 +210,8 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// update_task
 	srv.AddTool(mcpgo.NewTool("update_task",
-		mcpgo.WithDescription("Update a task's title, description, priority, or due date. Only provided fields are changed."),
+		mcpgo.WithDescription("Update a task's title, description, priority, or due date. " +
+			"Only provided fields are changed. Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithString("title", mcpgo.Description("Task title (max 512 chars)"), mcpgo.MaxLength(512)),
 		mcpgo.WithString("description", mcpgo.Description("Task description (max 100000 chars)"), mcpgo.MaxLength(100000)),
@@ -220,7 +256,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// set_task_state
 	srv.AddTool(mcpgo.NewTool("set_task_state",
-		mcpgo.WithDescription("Set task state. Cannot set Blocked directly — use add_blockers instead. Setting Done auto-unblocks dependents whose blockers are all complete."),
+		mcpgo.WithDescription("Set task state. Cannot set Blocked directly — use add_blockers instead. " +
+			"Setting Done auto-unblocks dependents whose blockers are all complete. " +
+			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithString("state", mcpgo.Required(), mcpgo.Description("Target state"), mcpgo.Enum("New", "Progressing", "Unblocked", "Done")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -241,7 +279,10 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// add_blockers
 	srv.AddTool(mcpgo.NewTool("add_blockers",
-		mcpgo.WithDescription("Add blocking dependencies. Transitions task to Blocked state. Validates no self-blocking or cycles. Blocker must not be Done or archived. Promotes blocker priority to at least match blocked task."),
+		mcpgo.WithDescription("Add blocking dependencies. Transitions task to Blocked state. " +
+			"Validates no self-blocking or cycles. Blocker must not be Done or archived. " +
+			"Promotes blocker priority to at least match blocked task. " +
+			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID to block"), mcpgo.Min(1)),
 		mcpgo.WithArray("blocker_ids", mcpgo.Required(), mcpgo.Description("IDs of tasks that block this one"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -262,7 +303,8 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// remove_blockers
 	srv.AddTool(mcpgo.NewTool("remove_blockers",
-		mcpgo.WithDescription("Remove specific blockers. Auto-transitions to Unblocked if no blockers remain."),
+		mcpgo.WithDescription("Remove specific blockers. Auto-transitions to Unblocked if no blockers remain. " +
+			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithArray("blocker_ids", mcpgo.Required(), mcpgo.Description("Blocker IDs to remove"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -283,7 +325,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// archive_task
 	srv.AddTool(mcpgo.NewTool("archive_task",
-		mcpgo.WithDescription("Archive task and its entire subtask tree. Fails if any task in the set blocks an external task. Preserves blocker entries."),
+		mcpgo.WithDescription("Archive task and its entire subtask tree. " +
+			"Fails if any task in the set blocks an external task. Preserves blocker entries. " +
+			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		id, err := requireUint(req, "task_id")
@@ -293,7 +337,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if err := s.ArchiveTask(ctx, id, true); err != nil {
 			return errResult(err), nil
 		}
-		detail, err := s.GetTask(ctx, id)
+		detail, err := s.GetTask(ctx, id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -302,7 +346,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// unarchive_task
 	srv.AddTool(mcpgo.NewTool("unarchive_task",
-		mcpgo.WithDescription("Unarchive task and its entire subtask tree. Validates preserved blocker relationships."),
+		mcpgo.WithDescription("Unarchive task and its entire subtask tree. " +
+			"Validates preserved blocker relationships. " +
+			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		id, err := requireUint(req, "task_id")
@@ -312,7 +358,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if err := s.ArchiveTask(ctx, id, false); err != nil {
 			return errResult(err), nil
 		}
-		detail, err := s.GetTask(ctx, id)
+		detail, err := s.GetTask(ctx, id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -342,7 +388,8 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// set_parent
 	srv.AddTool(mcpgo.NewTool("set_parent",
-		mcpgo.WithDescription("Make a task a subtask of another. Validates no cycles. Returns full task detail."),
+		mcpgo.WithDescription("Make a task a subtask of another. Validates no cycles. " +
+			"Returns full task detail. Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithNumber("parent_id", mcpgo.Required(), mcpgo.Description("Parent task ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -357,7 +404,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if err := s.SetParent(ctx, id, &pid); err != nil {
 			return errResult(err), nil
 		}
-		task, err := s.GetTask(ctx, id)
+		task, err := s.GetTask(ctx, id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -366,7 +413,8 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// unparent
 	srv.AddTool(mcpgo.NewTool("unparent",
-		mcpgo.WithDescription("Make a task top-level (remove from parent). Returns full task detail."),
+		mcpgo.WithDescription("Make a task top-level (remove from parent). Returns full task detail. " +
+			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		id, err := requireUint(req, "task_id")
@@ -376,7 +424,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if err := s.SetParent(ctx, id, nil); err != nil {
 			return errResult(err), nil
 		}
-		task, err := s.GetTask(ctx, id)
+		task, err := s.GetTask(ctx, id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 		if err != nil {
 			return errResult(err), nil
 		}

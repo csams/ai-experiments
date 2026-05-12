@@ -16,7 +16,7 @@ func TestArchive_Basic(t *testing.T) {
 		t.Fatalf("archive: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), task.ID)
+	detail, _ := s.GetTask(ctx(), task.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if !detail.Archived {
 		t.Error("expected archived = true")
 	}
@@ -44,7 +44,7 @@ func TestArchive_CascadesToSubtree(t *testing.T) {
 		t.Fatalf("archive: %v", err)
 	}
 
-	childDetail, _ := s.GetTask(ctx(), child.ID)
+	childDetail, _ := s.GetTask(ctx(), child.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if !childDetail.Archived {
 		t.Error("expected child to be archived")
 	}
@@ -77,8 +77,8 @@ func TestUnarchive_CascadesToSubtree(t *testing.T) {
 		t.Fatalf("unarchive: %v", err)
 	}
 
-	parentDetail, _ := s.GetTask(ctx(), parent.ID)
-	childDetail, _ := s.GetTask(ctx(), child.ID)
+	parentDetail, _ := s.GetTask(ctx(), parent.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	childDetail, _ := s.GetTask(ctx(), child.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if parentDetail.Archived || childDetail.Archived {
 		t.Error("expected both to be unarchived")
 	}
@@ -101,7 +101,7 @@ func TestUnarchive_CleansUpInvalidBlockers(t *testing.T) {
 		t.Fatalf("unarchive: %v", err)
 	}
 
-	detail, _ := s.GetTask(ctx(), a.ID)
+	detail, _ := s.GetTask(ctx(), a.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if len(detail.Blockers) != 0 {
 		t.Errorf("expected stale blocker to be cleaned up, got %d blockers", len(detail.Blockers))
 	}

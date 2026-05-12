@@ -122,8 +122,8 @@ func outputTaskDetail(detail *model.TaskDetail) {
 	if t.ParentID != nil {
 		fmt.Printf("  Parent:   #%d\n", *t.ParentID)
 	}
-	if t.Description != "" {
-		fmt.Printf("  Description: %s\n", t.Description)
+	if d := model.DerefStr(t.Description); d != "" {
+		fmt.Printf("  Description: %s\n", d)
 	}
 	if t.Checkpoint != nil {
 		fmt.Printf("\n  Checkpoint (updated %s):\n", t.Checkpoint.UpdatedAt.Format("2006-01-02 15:04"))

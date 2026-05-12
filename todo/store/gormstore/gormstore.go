@@ -591,7 +591,7 @@ func (s *GormStore) CreateTask(ctx context.Context, title, description string, p
 
 	task := model.Task{
 		Title:       title,
-		Description: description,
+		Description: model.PtrIfNonEmpty(description),
 		Priority:    priority,
 		State:       model.StateNew,
 		DueAt:       dueAt,
@@ -644,7 +644,7 @@ func (s *GormStore) CreateSubtask(ctx context.Context, parentID uint, title, des
 
 	task := model.Task{
 		Title:       title,
-		Description: description,
+		Description: model.PtrIfNonEmpty(description),
 		Priority:    priority,
 		State:       model.StateNew,
 		DueAt:       dueAt,
@@ -684,52 +684,103 @@ func (s *GormStore) CreateSubtask(ctx context.Context, parentID uint, title, des
 	return &task, nil
 }
 
-func (s *GormStore) GetTask(ctx context.Context, id uint) (*model.TaskDetail, error) {
+// taskBaseColumns is the always-loaded column set for GetTask and ListTasks.
+// `description` is added when opts.Include["description"]. `parent_id` must be
+// present even when "parent" is not requested, otherwise GORM silently no-ops
+// Preload("Parent").
+//
+// Tags are always loaded via Preload("Tags") in both GetTask and ListTasks —
+// they are cheap, bounded, and the vector syncer's chunk-building logic
+// (store/synced/synced.go buildTaskHeader) depends on them being present.
+// Do not move Tags behind an opt-in without updating the syncer.
+var taskBaseColumns = []string{
+	"id", "title", "priority", "state", "archived",
+	"due_at", "parent_id", "created_at", "updated_at",
+}
+
+func (s *GormStore) GetTask(ctx context.Context, id uint, opts store.GetTaskOptions) (*model.TaskDetail, error) {
 	if err := validateID(id); err != nil {
 		return nil, err
 	}
 
+	inc := opts.Include
+
 	db := s.db.WithContext(ctx)
+	cols := append([]string{}, taskBaseColumns...)
+	if inc["description"] {
+		cols = append(cols, "description")
+	}
+
+	// Tags and Checkpoint are always loaded (cheap, bounded).
+	q := db.Select(cols).Preload("Tags").Preload("Checkpoint")
+	if inc["notes"] {
+		q = q.Preload("Notes")
+	}
+	if inc["blockers"] {
+		q = q.Preload("Blockers")
+	}
+	if inc["links"] {
+		q = q.Preload("Links")
+	}
+	if inc["children"] {
+		q = q.Preload("Children")
+	}
+	if inc["parent"] {
+		q = q.Preload("Parent")
+	}
+
 	var task model.Task
-	err := db.
-		Preload("Notes").
-		Preload("Blockers").
-		Preload("Tags").
-		Preload("Links").
-		Preload("Children").
-		Preload("Parent").
-		Preload("Checkpoint").
-		First(&task, id).Error
-	if err != nil {
+	if err := q.First(&task, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("task %d: %w", id, model.ErrNotFound)
 		}
 		return nil, err
 	}
 
-	// Compute blocking list (tasks this one blocks)
-	var blocking []model.Task
-	var blockedTaskIDs []uint
-	if err := db.Model(&model.TaskBlocker{}).
-		Where("blocker_id = ?", id).
-		Pluck("task_id", &blockedTaskIDs).Error; err != nil {
-		return nil, err
-	}
-	if len(blockedTaskIDs) > 0 {
-		if err := db.Where("id IN ?", blockedTaskIDs).Find(&blocking).Error; err != nil {
+	detail := &model.TaskDetail{Task: task}
+
+	if inc["blocking"] {
+		var blockedTaskIDs []uint
+		if err := db.Model(&model.TaskBlocker{}).
+			Where("blocker_id = ?", id).
+			Pluck("task_id", &blockedTaskIDs).Error; err != nil {
 			return nil, err
+		}
+		if len(blockedTaskIDs) > 0 {
+			var blocking []model.Task
+			if err := db.Where("id IN ?", blockedTaskIDs).Find(&blocking).Error; err != nil {
+				return nil, err
+			}
+			detail.Blocking = blocking
 		}
 	}
 
-	return &model.TaskDetail{
-		Task:     task,
-		Blocking: blocking,
-	}, nil
+	return detail, nil
 }
 
 func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) ([]model.TaskListItem, error) {
 	db := s.db.WithContext(ctx)
-	q := db.Model(&model.Task{}).Preload("Tags")
+	inc := opts.Include
+	cols := append([]string{}, taskBaseColumns...)
+	if inc["description"] {
+		cols = append(cols, "description")
+	}
+	q := db.Model(&model.Task{}).Select(cols).Preload("Tags")
+	if inc["notes"] {
+		q = q.Preload("Notes")
+	}
+	if inc["blockers"] {
+		q = q.Preload("Blockers")
+	}
+	if inc["links"] {
+		q = q.Preload("Links")
+	}
+	if inc["children"] {
+		q = q.Preload("Children")
+	}
+	if inc["parent"] {
+		q = q.Preload("Parent")
+	}
 
 	// ParentID implies IncludeSubtasks
 	if opts.ParentID != nil {
@@ -886,8 +937,8 @@ func (s *GormStore) UpdateTask(ctx context.Context, id uint, opts store.UpdateTa
 			if err != nil {
 				return err
 			}
-			changes["description"] = store.Change{Old: task.Description, New: cleanDesc}
-			updates["description"] = cleanDesc
+			changes["description"] = store.Change{Old: model.DerefStr(task.Description), New: cleanDesc}
+			updates["description"] = model.PtrIfNonEmpty(cleanDesc)
 		}
 		if opts.Priority != nil {
 			newPriority := *opts.Priority
