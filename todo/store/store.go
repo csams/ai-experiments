@@ -14,6 +14,12 @@ type Store interface {
 	CreateTask(ctx context.Context, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
 	CreateSubtask(ctx context.Context, parentID uint, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
 	GetTask(ctx context.Context, id uint, opts GetTaskOptions) (*model.TaskDetail, error)
+	// GetTasks fetches multiple tasks by ID (max 100). Returns results in the
+	// caller's input order with duplicate IDs collapsed to first occurrence.
+	// Missing IDs are reported in NotFound rather than as an error — only
+	// validation failures and DB errors return non-nil error. Reads are
+	// non-transactional and emit no StoreEvent.
+	GetTasks(ctx context.Context, ids []uint, opts GetTaskOptions) (BatchGetTasksResult, error)
 	ListTasks(ctx context.Context, opts ListTasksOptions) ([]model.TaskListItem, error)
 	UpdateTask(ctx context.Context, id uint, opts UpdateTaskOptions) (*model.Task, error)
 	SetTaskState(ctx context.Context, id uint, state model.TaskState) (*model.Task, error) // non-Blocked only; Blocked returns ErrInvalidState
@@ -65,6 +71,14 @@ type Store interface {
 // "description", "notes", "links", "parent", "children", "blockers", "blocking".
 type GetTaskOptions struct {
 	Include map[string]bool
+}
+
+// BatchGetTasksResult is the return value of Store.GetTasks. Both slices are
+// guaranteed non-nil (initialized via make) so JSON serialization renders []
+// rather than null at any layer.
+type BatchGetTasksResult struct {
+	Tasks    []model.TaskDetail `json:"tasks"`     // input order, de-duplicated
+	NotFound []uint             `json:"not_found"` // valid IDs that had no matching task
 }
 
 // UpdateTaskOptions holds optional fields for updating a task.

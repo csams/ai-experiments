@@ -1,6 +1,7 @@
 package gormstore_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/csams/todo/model"
@@ -256,5 +257,215 @@ func TestUpdateTask_DescriptionRoundtrip(t *testing.T) {
 	detail = getTaskAll(t, s, ctx(), task.ID)
 	if detail.Description != nil {
 		t.Errorf("Description after clear should be nil, got %v", detail.Description)
+	}
+}
+
+// makeThreeTasks creates three independent tasks with unique titles and
+// returns the store plus their IDs in creation order.
+func makeThreeTasks(t *testing.T) (*gormstore.GormStore, []uint) {
+	t.Helper()
+	s := newTestStore(t)
+	ids := make([]uint, 3)
+	titles := []string{"Alpha", "Bravo", "Charlie"}
+	for i, title := range titles {
+		task, err := s.CreateTask(ctx(), title, "", 5, nil, nil)
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		ids[i] = task.ID
+	}
+	return s, ids
+}
+
+func TestGetTasks_HappyPath(t *testing.T) {
+	s, ids := makeThreeTasks(t)
+	result, err := s.GetTasks(ctx(), ids, store.GetTaskOptions{})
+	if err != nil {
+		t.Fatalf("GetTasks: %v", err)
+	}
+	if len(result.Tasks) != 3 {
+		t.Fatalf("Tasks len = %d, want 3", len(result.Tasks))
+	}
+	if len(result.NotFound) != 0 {
+		t.Errorf("NotFound = %v, want empty", result.NotFound)
+	}
+	for i, want := range ids {
+		if result.Tasks[i].ID != want {
+			t.Errorf("Tasks[%d].ID = %d, want %d", i, result.Tasks[i].ID, want)
+		}
+	}
+}
+
+func TestGetTasks_PreservesInputOrder(t *testing.T) {
+	s, ids := makeThreeTasks(t)
+	// Reverse + middle-first ordering.
+	input := []uint{ids[2], ids[0], ids[1]}
+	result, err := s.GetTasks(ctx(), input, store.GetTaskOptions{})
+	if err != nil {
+		t.Fatalf("GetTasks: %v", err)
+	}
+	if len(result.Tasks) != 3 {
+		t.Fatalf("Tasks len = %d, want 3", len(result.Tasks))
+	}
+	for i, want := range input {
+		if result.Tasks[i].ID != want {
+			t.Errorf("Tasks[%d].ID = %d, want %d", i, result.Tasks[i].ID, want)
+		}
+	}
+}
+
+func TestGetTasks_DeduplicatesPreservingFirstOccurrence(t *testing.T) {
+	s, ids := makeThreeTasks(t)
+	input := []uint{ids[2], ids[0], ids[2], ids[1], ids[0]}
+	result, err := s.GetTasks(ctx(), input, store.GetTaskOptions{})
+	if err != nil {
+		t.Fatalf("GetTasks: %v", err)
+	}
+	want := []uint{ids[2], ids[0], ids[1]}
+	if len(result.Tasks) != len(want) {
+		t.Fatalf("Tasks len = %d, want %d", len(result.Tasks), len(want))
+	}
+	for i, w := range want {
+		if result.Tasks[i].ID != w {
+			t.Errorf("Tasks[%d].ID = %d, want %d", i, result.Tasks[i].ID, w)
+		}
+	}
+}
+
+func TestGetTasks_MissingIDsReportedInNotFound(t *testing.T) {
+	s, ids := makeThreeTasks(t)
+	input := []uint{ids[0], 99999, ids[1], 88888}
+	result, err := s.GetTasks(ctx(), input, store.GetTaskOptions{})
+	if err != nil {
+		t.Fatalf("GetTasks: %v", err)
+	}
+	if len(result.Tasks) != 2 {
+		t.Fatalf("Tasks len = %d, want 2", len(result.Tasks))
+	}
+	if result.Tasks[0].ID != ids[0] || result.Tasks[1].ID != ids[1] {
+		t.Errorf("Tasks IDs = [%d, %d], want [%d, %d]", result.Tasks[0].ID, result.Tasks[1].ID, ids[0], ids[1])
+	}
+	want := []uint{99999, 88888}
+	if len(result.NotFound) != len(want) {
+		t.Fatalf("NotFound = %v, want %v", result.NotFound, want)
+	}
+	for i, w := range want {
+		if result.NotFound[i] != w {
+			t.Errorf("NotFound[%d] = %d, want %d", i, result.NotFound[i], w)
+		}
+	}
+}
+
+func TestGetTasks_IncludesApplyToEveryTask(t *testing.T) {
+	f := makeBusyTask(t)
+	// Second task with no notes/links to confirm includes apply uniformly.
+	plain, err := f.s.CreateTask(ctx(), "Plain", "", 5, nil, nil)
+	if err != nil {
+		t.Fatalf("create plain: %v", err)
+	}
+
+	result, err := f.s.GetTasks(ctx(), []uint{f.taskID, plain.ID}, store.GetTaskOptions{
+		Include: map[string]bool{"notes": true, "description": true},
+	})
+	if err != nil {
+		t.Fatalf("GetTasks: %v", err)
+	}
+	if len(result.Tasks) != 2 {
+		t.Fatalf("Tasks len = %d, want 2", len(result.Tasks))
+	}
+	if len(result.Tasks[0].Notes) != 1 {
+		t.Errorf("busy task Notes = %v, want 1", result.Tasks[0].Notes)
+	}
+	if d := model.DerefStr(result.Tasks[0].Description); d != "A description." {
+		t.Errorf("busy task Description = %q, want 'A description.'", d)
+	}
+	if len(result.Tasks[1].Notes) != 0 {
+		t.Errorf("plain task Notes = %v, want empty", result.Tasks[1].Notes)
+	}
+}
+
+func TestGetTasks_BlockingMatchesSingleGetTask(t *testing.T) {
+	f := makeBusyTask(t)
+	single, err := f.s.GetTask(ctx(), f.taskID, store.GetTaskOptions{Include: map[string]bool{"blocking": true}})
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	batch, err := f.s.GetTasks(ctx(), []uint{f.taskID}, store.GetTaskOptions{Include: map[string]bool{"blocking": true}})
+	if err != nil {
+		t.Fatalf("GetTasks: %v", err)
+	}
+	if len(batch.Tasks) != 1 {
+		t.Fatalf("Tasks len = %d, want 1", len(batch.Tasks))
+	}
+	if len(batch.Tasks[0].Blocking) != len(single.Blocking) {
+		t.Fatalf("Blocking len = %d, want %d", len(batch.Tasks[0].Blocking), len(single.Blocking))
+	}
+	if len(single.Blocking) > 0 && batch.Tasks[0].Blocking[0].ID != single.Blocking[0].ID {
+		t.Errorf("Blocking[0].ID mismatch: batch=%d single=%d", batch.Tasks[0].Blocking[0].ID, single.Blocking[0].ID)
+	}
+}
+
+func TestGetTasks_ValidationErrors(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.GetTasks(ctx(), nil, store.GetTaskOptions{}); err == nil {
+		t.Error("expected error for nil ids")
+	} else {
+		var ve *model.ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("nil ids: error = %v, want *model.ValidationError", err)
+		}
+	}
+
+	if _, err := s.GetTasks(ctx(), []uint{}, store.GetTaskOptions{}); err == nil {
+		t.Error("expected error for empty ids")
+	} else {
+		var ve *model.ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("empty ids: error = %v, want *model.ValidationError", err)
+		}
+	}
+
+	tooMany := make([]uint, 101)
+	for i := range tooMany {
+		tooMany[i] = uint(i + 1)
+	}
+	if _, err := s.GetTasks(ctx(), tooMany, store.GetTaskOptions{}); err == nil {
+		t.Error("expected error for 101 ids")
+	} else {
+		var ve *model.ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("too many ids: error = %v, want *model.ValidationError", err)
+		}
+	}
+
+	if _, err := s.GetTasks(ctx(), []uint{1, 0, 2}, store.GetTaskOptions{}); err == nil {
+		t.Error("expected error for zero ID")
+	} else {
+		var ve *model.ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("zero id: error = %v, want *model.ValidationError", err)
+		}
+	}
+}
+
+func TestGetTasks_EmptyResultStillNonNilSlices(t *testing.T) {
+	s := newTestStore(t)
+	// One valid ID that doesn't exist.
+	result, err := s.GetTasks(ctx(), []uint{99999}, store.GetTaskOptions{})
+	if err != nil {
+		t.Fatalf("GetTasks: %v", err)
+	}
+	if result.Tasks == nil {
+		t.Error("Tasks should be non-nil (empty slice)")
+	}
+	if result.NotFound == nil {
+		t.Error("NotFound should be non-nil (empty slice)")
+	}
+	if len(result.Tasks) != 0 {
+		t.Errorf("Tasks len = %d, want 0", len(result.Tasks))
+	}
+	if len(result.NotFound) != 1 || result.NotFound[0] != 99999 {
+		t.Errorf("NotFound = %v, want [99999]", result.NotFound)
 	}
 }

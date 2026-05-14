@@ -758,6 +758,135 @@ func (s *GormStore) GetTask(ctx context.Context, id uint, opts store.GetTaskOpti
 	return detail, nil
 }
 
+// GetTasks returns multiple task details in the caller's input order.
+// Duplicates collapse to first occurrence. Missing IDs go to NotFound rather
+// than producing an error. Read-only — no transaction, no observer events.
+//
+// Ordering note: bulk mutation ops sort IDs ascending for deterministic
+// locking; reads preserve input order so callers can align ids[i] with
+// either the found result or the not_found list.
+func (s *GormStore) GetTasks(ctx context.Context, ids []uint, opts store.GetTaskOptions) (store.BatchGetTasksResult, error) {
+	result := store.BatchGetTasksResult{
+		Tasks:    make([]model.TaskDetail, 0),
+		NotFound: make([]uint, 0),
+	}
+
+	if len(ids) == 0 {
+		return result, &model.ValidationError{Field: "ids", Message: "must not be empty"}
+	}
+	if len(ids) > maxBulkIDs {
+		return result, &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
+	}
+
+	// Dedup preserving first-occurrence order; remember each ID's input index.
+	uniqueIDs := make([]uint, 0, len(ids))
+	inputIndex := make(map[uint]int, len(ids))
+	for i, id := range ids {
+		if err := validateID(id); err != nil {
+			return result, err
+		}
+		if _, seen := inputIndex[id]; seen {
+			continue
+		}
+		inputIndex[id] = i
+		uniqueIDs = append(uniqueIDs, id)
+	}
+
+	inc := opts.Include
+
+	db := s.db.WithContext(ctx)
+	cols := append([]string{}, taskBaseColumns...)
+	if inc["description"] {
+		cols = append(cols, "description")
+	}
+
+	q := db.Model(&model.Task{}).Select(cols).Preload("Tags").Preload("Checkpoint")
+	if inc["notes"] {
+		q = q.Preload("Notes")
+	}
+	if inc["blockers"] {
+		q = q.Preload("Blockers")
+	}
+	if inc["links"] {
+		q = q.Preload("Links")
+	}
+	if inc["children"] {
+		q = q.Preload("Children")
+	}
+	if inc["parent"] {
+		q = q.Preload("Parent")
+	}
+
+	var tasks []model.Task
+	if err := q.Where("id IN ?", uniqueIDs).Find(&tasks).Error; err != nil {
+		return result, err
+	}
+
+	// Build per-ID Blocking lists with two batched queries when requested.
+	blockingByTaskID := map[uint][]model.Task{}
+	if inc["blocking"] && len(tasks) > 0 {
+		var rows []model.TaskBlocker
+		if err := db.Model(&model.TaskBlocker{}).Where("blocker_id IN ?", uniqueIDs).Find(&rows).Error; err != nil {
+			return result, err
+		}
+		blockedIDsByBlocker := map[uint][]uint{}
+		blockedIDSet := map[uint]struct{}{}
+		for _, r := range rows {
+			blockedIDsByBlocker[r.BlockerID] = append(blockedIDsByBlocker[r.BlockerID], r.TaskID)
+			blockedIDSet[r.TaskID] = struct{}{}
+		}
+		if len(blockedIDSet) > 0 {
+			blockedIDs := make([]uint, 0, len(blockedIDSet))
+			for id := range blockedIDSet {
+				blockedIDs = append(blockedIDs, id)
+			}
+			var blocking []model.Task
+			if err := db.Where("id IN ?", blockedIDs).Find(&blocking).Error; err != nil {
+				return result, err
+			}
+			byID := make(map[uint]model.Task, len(blocking))
+			for _, t := range blocking {
+				byID[t.ID] = t
+			}
+			for blockerID, blocked := range blockedIDsByBlocker {
+				list := make([]model.Task, 0, len(blocked))
+				for _, bid := range blocked {
+					if t, ok := byID[bid]; ok {
+						list = append(list, t)
+					}
+				}
+				blockingByTaskID[blockerID] = list
+			}
+		}
+	}
+
+	details := make([]model.TaskDetail, len(tasks))
+	foundIDs := make(map[uint]struct{}, len(tasks))
+	for i, t := range tasks {
+		d := model.TaskDetail{Task: t}
+		if blocking, ok := blockingByTaskID[t.ID]; ok {
+			d.Blocking = blocking
+		}
+		details[i] = d
+		foundIDs[t.ID] = struct{}{}
+	}
+
+	// Sort details by the caller's input position.
+	sort.Slice(details, func(i, j int) bool {
+		return inputIndex[details[i].ID] < inputIndex[details[j].ID]
+	})
+	result.Tasks = details
+
+	// Collect missing IDs in input order.
+	for _, id := range uniqueIDs {
+		if _, ok := foundIDs[id]; !ok {
+			result.NotFound = append(result.NotFound, id)
+		}
+	}
+
+	return result, nil
+}
+
 func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) ([]model.TaskListItem, error) {
 	db := s.db.WithContext(ctx)
 	inc := opts.Include

@@ -74,9 +74,9 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (32 core + 2 optional semantic)
+### Available MCP Tools (33 core + 2 optional semantic)
 
-**Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
+**Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
 
 **Notes:** `add_note`, `update_note`, `list_notes`, `list_all_notes`, `search_notes`, `delete_note`
 
@@ -117,6 +117,17 @@ Semantic search excludes archived items by default. Pass `include_archived: true
 **Combining tag filters:** Use `tags` + `tags_subset_of` together for exact tag matching (task has at least AND only these tags).
 
 **CLI equivalents:** `--has-due-date`, `--no-due-date`, `--due-before`, `--due-after`, `--due-on`, `--priority-min`, `--priority-max`, `--tag-subset-of`, `--query`/`-q`.
+
+### `get_tasks` Batch fetch
+
+`get_tasks` fetches multiple tasks in one call (max 100 IDs). The response is `{"tasks": [...], "not_found": [...]}`:
+
+- **Input order is preserved** — `tasks[i]` corresponds to the i-th unique input ID. Unlike the `bulk_*` mutation ops (which sort ascending), reads keep caller order so clients can align positions with their request.
+- **Duplicates collapse** to first occurrence.
+- **Missing IDs do not error** — they go into `not_found` instead, so partial hits still return data.
+- **`include`** uses the same enum as `get_task` (`description`, `notes`, `links`, `parent`, `children`, `blockers`, `blocking`, plus `*`) and applies uniformly to every returned task.
+- Both arrays are always present in the response, rendered as `[]` when empty (never `null`).
+- CLI equivalent: `todo task get-many <id> <id> [...]` (full detail by default; `--json` emits the structured response).
 
 ## Task States
 

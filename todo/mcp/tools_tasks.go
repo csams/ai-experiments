@@ -215,6 +215,42 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		return textResult(toJSON(detail)), nil
 	})
 
+	// get_tasks
+	srv.AddTool(mcpgo.NewTool("get_tasks",
+		mcpgo.WithDescription("Batch-fetch multiple tasks in one call (max 100). Returns "+
+			"{\"tasks\": [...], \"not_found\": [...]}. Tasks come back in the order of the "+
+			"input `ids` (duplicates collapsed to first occurrence); IDs with no matching "+
+			"task go into `not_found` rather than aborting the call. The `include` option "+
+			"applies uniformly to every task — same enum and \"*\" semantics as get_task. "+
+			"Empty results render as [] (never null)."),
+		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
+		mcpgo.WithArray("include",
+			mcpgo.Description("Optional fields to load. Choices: description, notes, "+
+				"links, parent, children, blockers, blocking. Use \"*\" for all."),
+			mcpgo.WithStringItems(mcpgo.Enum(
+				"*", "description", "notes", "links", "parent", "children", "blockers", "blocking",
+			)),
+			mcpgo.MaxItems(8),
+		),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		ids, err := requireUintSlice(req, "ids")
+		if err != nil {
+			return errResult(err), nil
+		}
+		if len(ids) > maxBulkMCPIDs {
+			return errResult(fmt.Errorf("ids: max %d per call", maxBulkMCPIDs)), nil
+		}
+		inc, err := resolveTaskIncludes(req, model.TaskIncludes)
+		if err != nil {
+			return errResult(err), nil
+		}
+		result, err := s.GetTasks(ctx, ids, store.GetTaskOptions{Include: inc})
+		if err != nil {
+			return errResult(err), nil
+		}
+		return textResult(toJSON(result)), nil
+	})
+
 	// update_task
 	srv.AddTool(mcpgo.NewTool("update_task",
 		mcpgo.WithDescription("Update a task's title, description, priority, or due date. " +
