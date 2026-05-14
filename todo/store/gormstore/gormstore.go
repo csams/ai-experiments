@@ -849,6 +849,23 @@ func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) 
 		q = q.Where("NOT EXISTS (SELECT 1 FROM task_tags WHERE task_tags.task_id = tasks.id AND tag NOT IN ?)", cleanSubset)
 	}
 
+	// Query: case-insensitive substring across title, description, and link
+	// descriptions. Gated on non-empty so the zero value of ListTasksOptions
+	// remains a no-op (validateSearchQuery rejects empty strings).
+	if opts.Query != "" {
+		query, err := validateSearchQuery(opts.Query)
+		if err != nil {
+			return nil, err
+		}
+		pattern := "%" + escapeLike(strings.ToLower(query)) + "%"
+		q = q.Where(
+			"LOWER(tasks.title) LIKE ? ESCAPE '\\' OR "+
+				"LOWER(tasks.description) LIKE ? ESCAPE '\\' OR "+
+				"EXISTS (SELECT 1 FROM links WHERE links.task_id = tasks.id AND LOWER(links.description) LIKE ? ESCAPE '\\')",
+			pattern, pattern, pattern,
+		)
+	}
+
 	// Sort
 	switch opts.SortBy {
 	case "due":
@@ -1498,15 +1515,22 @@ func (s *GormStore) SearchTasks(ctx context.Context, query string) ([]model.Task
 	return tasks, err
 }
 
-func (s *GormStore) SearchNotes(ctx context.Context, query string) ([]model.Note, error) {
+func (s *GormStore) SearchNotes(ctx context.Context, query string, opts store.SearchNotesOptions) ([]model.Note, error) {
 	var err error
 	if query, err = validateSearchQuery(query); err != nil {
 		return nil, err
 	}
 	db := s.db.WithContext(ctx)
 	pattern := "%" + escapeLike(strings.ToLower(query)) + "%"
+	q := db.Where("LOWER(text) LIKE ? ESCAPE '\\'", pattern)
+	if !opts.IncludeArchived {
+		q = q.Where("archived = ?", false)
+	}
+	if opts.TaskID != nil {
+		q = q.Where("task_id = ?", *opts.TaskID)
+	}
 	var notes []model.Note
-	err = db.Where("LOWER(text) LIKE ? ESCAPE '\\'", pattern).Limit(defaultQueryLimit).Find(&notes).Error
+	err = q.Limit(defaultQueryLimit).Find(&notes).Error
 	return notes, err
 }
 

@@ -241,7 +241,8 @@ var noteSearchCmd = &cobra.Command{
 		}
 		defer s.Close(cmd.Context())
 
-		notes, err := s.SearchNotes(cmd.Context(), args[0])
+		includeArchived, _ := cmd.Flags().GetBool("include-archived")
+		notes, err := s.SearchNotes(cmd.Context(), args[0], store.SearchNotesOptions{IncludeArchived: includeArchived})
 		if err != nil {
 			return err
 		}
@@ -262,6 +263,8 @@ func init() {
 
 	noteListCmd.Flags().Bool("all", false, "list every note (attached + standalone)")
 	noteListCmd.Flags().Bool("standalone", false, "list only standalone notes")
+
+	noteSearchCmd.Flags().Bool("include-archived", false, "include archived notes in results (default: false)")
 
 	noteCmd.AddCommand(noteAddCmd)
 	noteCmd.AddCommand(noteUpdateCmd)

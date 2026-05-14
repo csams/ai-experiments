@@ -90,8 +90,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	srv.AddTool(mcpgo.NewTool("list_tasks",
 		mcpgo.WithDescription("List tasks with filters and sorting. By default shows only "+
 			"non-archived top-level tasks sorted by priority. Supports filtering by state, "+
-			"due date (range, exact day, or presence), priority range, and tags (superset "+
-			"AND logic or subset containment). Use `include` to opt into expensive per-item "+
+			"due date (range, exact day, or presence), priority range, tags (superset "+
+			"AND logic or subset containment), and a `query` substring filter on title, "+
+			"description, and link descriptions. Use `include` to opt into expensive per-item "+
 			"fields (description, notes, links, parent, children, blockers); by default each "+
 			"item carries only cheap bounded fields plus tags and a has_checkpoint flag."),
 		mcpgo.WithString("state", mcpgo.Description("Filter by state"), mcpgo.Enum("New", "Progressing", "Blocked", "Unblocked", "Done")),
@@ -116,6 +117,11 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 			mcpgo.Description("Minimum priority value, inclusive (lower number = higher importance). Negative values allowed.")),
 		mcpgo.WithNumber("priority_max",
 			mcpgo.Description("Maximum priority value, inclusive (lower number = higher importance). Negative values allowed.")),
+		mcpgo.WithString("query",
+			mcpgo.Description("Case-insensitive substring match on title, description, and link descriptions (max 500 chars). "+
+				"Use this for exact keyword/substring lookups (a name, codename, ID fragment, distinctive word). "+
+				"For conceptual / 'what was that thing about X' lookups, use semantic_search instead."),
+			mcpgo.MaxLength(500)),
 		mcpgo.WithArray("tags_subset_of",
 			mcpgo.Description("Task's tags must all be within this set (subset check). "+
 				"A task with no tags matches (empty set is a subset of any set). "+
@@ -146,6 +152,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 			PriorityMin:     getOptInt(req, "priority_min"),
 			PriorityMax:     getOptInt(req, "priority_max"),
 			TagsSubsetOf:    getStrSlice(req, "tags_subset_of"),
+			Query:           getStr(req, "query"),
 			Include:         inc,
 		}
 		if stateStr := getStr(req, "state"); stateStr != "" {

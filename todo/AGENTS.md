@@ -74,11 +74,11 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (31 core + 2 optional semantic)
+### Available MCP Tools (32 core + 2 optional semantic)
 
 **Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
 
-**Notes:** `add_note`, `update_note`, `list_notes`, `list_all_notes`, `delete_note`
+**Notes:** `add_note`, `update_note`, `list_notes`, `list_all_notes`, `search_notes`, `delete_note`
 
 **Links:** `add_link` (with optional `description`), `list_links`, `update_link`, `delete_link`
 
@@ -111,11 +111,12 @@ Semantic search excludes archived items by default. Pass `include_archived: true
 | `due_on` | string | Due on this calendar day (YYYY-MM-DD, UTC) |
 | `priority_min` | number | Priority >= this value (inclusive) |
 | `priority_max` | number | Priority <= this value (inclusive) |
+| `query` | string | Case-insensitive substring match on title, description, and link descriptions (max 500 chars). Use for exact keyword lookups; use `semantic_search` for conceptual matches. |
 | `sort_by` | string | Sort: priority (default), due, created, updated |
 
 **Combining tag filters:** Use `tags` + `tags_subset_of` together for exact tag matching (task has at least AND only these tags).
 
-**CLI equivalents:** `--has-due-date`, `--no-due-date`, `--due-before`, `--due-after`, `--due-on`, `--priority-min`, `--priority-max`, `--tag-subset-of`.
+**CLI equivalents:** `--has-due-date`, `--no-due-date`, `--due-before`, `--due-after`, `--due-on`, `--priority-min`, `--priority-max`, `--tag-subset-of`, `--query`/`-q`.
 
 ## Task States
 

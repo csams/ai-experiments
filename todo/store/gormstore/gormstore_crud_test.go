@@ -544,7 +544,7 @@ func TestSearchNotes(t *testing.T) {
 	s.AddNote(ctx(), &task.ID, "checked auth token expiry")
 	s.AddNote(ctx(), &task.ID, "unrelated note")
 
-	results, err := s.SearchNotes(ctx(), "auth")
+	results, err := s.SearchNotes(ctx(), "auth", store.SearchNotesOptions{})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -553,7 +553,183 @@ func TestSearchNotes(t *testing.T) {
 	}
 }
 
-func intPtr(i int) *int   { return &i }
+func TestSearchNotes_ExcludesArchivedByDefault(t *testing.T) {
+	s := newTestStore(t)
+	live, _ := s.AddNote(ctx(), nil, "auth token rotation plan")
+	archived, _ := s.AddNote(ctx(), nil, "auth migration scratchpad")
+	if err := s.ArchiveNote(ctx(), archived.ID, true); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+
+	results, err := s.SearchNotes(ctx(), "auth", store.SearchNotesOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != live.ID {
+		t.Errorf("default search returned %d notes, want only the live one (id %d)", len(results), live.ID)
+	}
+
+	all, err := s.SearchNotes(ctx(), "auth", store.SearchNotesOptions{IncludeArchived: true})
+	if err != nil {
+		t.Fatalf("search include_archived: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("include_archived returned %d notes, want 2", len(all))
+	}
+}
+
+func TestSearchNotes_TaskIDFilter(t *testing.T) {
+	s := newTestStore(t)
+	taskA, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
+	taskB, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	s.AddNote(ctx(), &taskA.ID, "auth notes for A")
+	s.AddNote(ctx(), &taskB.ID, "auth notes for B")
+	s.AddNote(ctx(), nil, "auth standalone")
+
+	results, err := s.SearchNotes(ctx(), "auth", store.SearchNotesOptions{TaskID: &taskA.ID})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	if results[0].TaskID == nil || *results[0].TaskID != taskA.ID {
+		t.Errorf("result task_id = %v, want %d", results[0].TaskID, taskA.ID)
+	}
+}
+
+func TestListTasks_Query_TitleMatch(t *testing.T) {
+	s := newTestStore(t)
+	hit, _ := s.CreateTask(ctx(), "Fix login flow", "", 0, nil, nil)
+	s.CreateTask(ctx(), "Update docs", "", 0, nil, nil)
+	s.CreateTask(ctx(), "Refactor auth helpers", "", 0, nil, nil)
+
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{Query: "login"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != hit.ID {
+		t.Errorf("got %d tasks, want only id %d", len(tasks), hit.ID)
+	}
+}
+
+func TestListTasks_Query_DescriptionMatch(t *testing.T) {
+	s := newTestStore(t)
+	hit, _ := s.CreateTask(ctx(), "Some task", "this body mentions Mongoose configuration", 0, nil, nil)
+	s.CreateTask(ctx(), "Other", "unrelated body", 0, nil, nil)
+
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{Query: "mongoose", Include: map[string]bool{"description": true}})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != hit.ID {
+		t.Errorf("got %d tasks, want only id %d", len(tasks), hit.ID)
+	}
+}
+
+func TestListTasks_Query_LinkDescriptionMatch(t *testing.T) {
+	s := newTestStore(t)
+	hit, _ := s.CreateTask(ctx(), "Investigate", "", 0, nil, nil)
+	s.CreateTask(ctx(), "Other", "no links", 0, nil, nil)
+	if _, err := s.AddLink(ctx(), hit.ID, model.LinkURL, "https://example.com/runbook", "Sentinel runbook details"); err != nil {
+		t.Fatalf("add link: %v", err)
+	}
+
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{Query: "sentinel"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != hit.ID {
+		t.Errorf("got %d tasks, want only id %d", len(tasks), hit.ID)
+	}
+}
+
+func TestListTasks_Query_ComposesWithFilters(t *testing.T) {
+	s := newTestStore(t)
+	parent, _ := s.CreateTask(ctx(), "Root project", "", 0, nil, []string{"work"})
+	hit, _ := s.CreateSubtask(ctx(), parent.ID, "Wire foo into bar", "", 0, nil, []string{"work"})
+	s.CreateSubtask(ctx(), parent.ID, "Wire baz into qux", "", 0, nil, []string{"work"})       // wrong query
+	s.CreateSubtask(ctx(), parent.ID, "Wire foo elsewhere", "", 0, nil, []string{"work", "x"}) // tag set wrong
+	if _, err := s.SetTaskState(ctx(), hit.ID, model.StateProgressing); err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+
+	state := model.StateProgressing
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{
+		Query:        "foo",
+		ParentID:     &parent.ID,
+		TagsSubsetOf: []string{"work"},
+		State:        &state,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != hit.ID {
+		t.Errorf("got %d tasks, want only id %d (composed filters)", len(tasks), hit.ID)
+	}
+}
+
+func TestListTasks_Query_LIKEWildcardEscaping(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateTask(ctx(), "100% complete", "", 0, nil, nil)
+	s.CreateTask(ctx(), "Normal task", "", 0, nil, nil)
+
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{Query: "%"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("query=%% got %d tasks, want 1 (must not act as wildcard)", len(tasks))
+	}
+
+	tasks, _ = s.ListTasks(ctx(), store.ListTasksOptions{Query: "_"})
+	if len(tasks) != 0 {
+		t.Errorf("query=_ got %d tasks, want 0", len(tasks))
+	}
+}
+
+func TestListTasks_Query_EmptyMeansNoFilter(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateTask(ctx(), "A", "", 0, nil, nil)
+	s.CreateTask(ctx(), "B", "", 0, nil, nil)
+
+	withEmpty, err := s.ListTasks(ctx(), store.ListTasksOptions{Query: ""})
+	if err != nil {
+		t.Fatalf("list empty query: %v", err)
+	}
+	without, err := s.ListTasks(ctx(), store.ListTasksOptions{})
+	if err != nil {
+		t.Fatalf("list no opts: %v", err)
+	}
+	if len(withEmpty) != len(without) {
+		t.Errorf("empty Query returned %d tasks, no Query returned %d (must match)", len(withEmpty), len(without))
+	}
+	if len(withEmpty) != 2 {
+		t.Errorf("expected 2 tasks, got %d", len(withEmpty))
+	}
+}
+
+func TestListTasks_Query_UnicodeNormalization(t *testing.T) {
+	// Stored as NFC "café" (single composed e-acute).
+	want := "café"
+	// Query as NFD "café" (e + combining acute) — sanitize must normalize
+	// before the LIKE pattern is built, otherwise the substring won't match.
+	queryNFD := "café"
+
+	s := newTestStore(t)
+	hit, _ := s.CreateTask(ctx(), want+" launch", "", 0, nil, nil)
+	s.CreateTask(ctx(), "unrelated", "", 0, nil, nil)
+
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{Query: queryNFD})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != hit.ID {
+		t.Errorf("got %d tasks, want only id %d (NFD query must match NFC stored title)", len(tasks), hit.ID)
+	}
+}
+
+func intPtr(i int) *int    { return &i }
 func boolPtr(b bool) *bool { return &b }
 
 func TestListTasks_HasDueDate(t *testing.T) {

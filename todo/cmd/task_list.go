@@ -25,6 +25,7 @@ var taskListCmd = &cobra.Command{
 		opts.SortBy, _ = cmd.Flags().GetString("sort")
 		opts.Tags, _ = cmd.Flags().GetStringSlice("tag")
 		opts.TagsSubsetOf, _ = cmd.Flags().GetStringSlice("tag-subset-of")
+		opts.Query, _ = cmd.Flags().GetString("query")
 
 		if stateStr, _ := cmd.Flags().GetString("state"); stateStr != "" {
 			state, err := normalizeState(stateStr)
@@ -118,5 +119,6 @@ func init() {
 	taskListCmd.Flags().Int("priority-min", 0, "minimum priority value (inclusive)")
 	taskListCmd.Flags().Int("priority-max", 0, "maximum priority value (inclusive)")
 	taskListCmd.Flags().StringSlice("tag-subset-of", nil, "task tags must be within this set (repeatable)")
+	taskListCmd.Flags().StringP("query", "q", "", "case-insensitive substring match on title, description, and link descriptions")
 	taskCmd.AddCommand(taskListCmd)
 }

@@ -23,7 +23,7 @@ type Store interface {
 	ArchiveTask(ctx context.Context, id uint, archived bool) error
 	DeleteTask(ctx context.Context, id uint, opts DeleteTaskOptions) error
 	SearchTasks(ctx context.Context, query string) ([]model.Task, error)
-	SearchNotes(ctx context.Context, query string) ([]model.Note, error)
+	SearchNotes(ctx context.Context, query string, opts SearchNotesOptions) ([]model.Note, error)
 
 	// Bulk operations (max 100 IDs per call)
 	BulkUpdateState(ctx context.Context, ids []uint, state model.TaskState) ([]model.Task, error)
@@ -103,6 +103,13 @@ type SetCheckpointOptions struct {
 	OpenThreads string
 }
 
+// SearchNotesOptions controls SearchNotes filtering. Zero value excludes
+// archived notes and matches across all notes (attached and standalone).
+type SearchNotesOptions struct {
+	IncludeArchived bool
+	TaskID          *uint // nil = all notes; non-nil = only notes attached to this task
+}
+
 // UpdateLinkOptions holds optional fields for updating a link.
 // Nil pointer fields are not changed. For Description, &"" explicitly clears
 // the field to empty (description is optional). URL must remain non-empty —
@@ -137,6 +144,11 @@ type ListTasksOptions struct {
 
 	// Tag subset filter
 	TagsSubsetOf []string // task's tags must all be within this set
+
+	// Query is a case-insensitive substring filter on title, description, and
+	// any link description. Empty = no filter; non-empty composes (AND) with
+	// all other filters above.
+	Query string
 
 	// Optional opt-in fields per item. Empty means cheap fields only
 	// (id, title, priority, state, archived, due_at, parent_id, timestamps,
