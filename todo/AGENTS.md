@@ -98,7 +98,7 @@ Semantic search excludes archived items by default. Pass `include_archived: true
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `state` | string | Filter by state: New, Progressing, Blocked, Unblocked, Done |
+| `states` | array[string] | Filter by state (OR logic): New, Progressing, Blocked, Unblocked, Done |
 | `include_archived` | boolean | Include archived tasks (default: false) |
 | `include_subtasks` | boolean | Include subtasks in flat list (default: false) |
 | `parent_id` | number | Filter to subtree of this task ID |
@@ -116,7 +116,9 @@ Semantic search excludes archived items by default. Pass `include_archived: true
 
 **Combining tag filters:** Use `tags` + `tags_subset_of` together for exact tag matching (task has at least AND only these tags).
 
-**CLI equivalents:** `--has-due-date`, `--no-due-date`, `--due-before`, `--due-after`, `--due-on`, `--priority-min`, `--priority-max`, `--tag-subset-of`, `--query`/`-q`.
+**CLI equivalents:** `--state` (repeatable), `--has-due-date`, `--no-due-date`, `--due-before`, `--due-after`, `--due-on`, `--priority-min`, `--priority-max`, `--tag-subset-of`, `--query`/`-q`.
+
+**Migration callout (breaking change):** the `list_tasks` MCP parameter `state` (single string) has been renamed to `states` (array of strings) with OR-logic across the listed values. Clients that previously passed `state: "Done"` should now pass `states: ["Done"]`. The CLI `--state` flag keeps its name but is now a `StringSlice` (repeatable / comma-separated) — single-value invocations remain compatible.
 
 ### `get_tasks` Batch fetch
 

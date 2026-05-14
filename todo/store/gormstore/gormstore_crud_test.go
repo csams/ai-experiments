@@ -185,13 +185,35 @@ func TestListTasks_FilterByState(t *testing.T) {
 	task2, _ := s.CreateTask(ctx(), "Progressing", "", 0, nil, nil)
 	s.SetTaskState(ctx(), task2.ID, model.StateProgressing)
 
-	state := model.StateProgressing
-	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{State: &state})
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{States: []model.TaskState{model.StateProgressing}})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(tasks) != 1 || tasks[0].ID != task2.ID {
 		t.Errorf("expected 1 progressing task, got %d", len(tasks))
+	}
+}
+
+func TestListTasks_FilterByMultipleStates(t *testing.T) {
+	s := newTestStore(t)
+	newTask, _ := s.CreateTask(ctx(), "New task", "", 0, nil, nil)
+	progressingTask, _ := s.CreateTask(ctx(), "Progressing", "", 0, nil, nil)
+	s.SetTaskState(ctx(), progressingTask.ID, model.StateProgressing)
+	doneTask, _ := s.CreateTask(ctx(), "Done", "", 0, nil, nil)
+	s.SetTaskState(ctx(), doneTask.ID, model.StateDone)
+
+	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{
+		States: []model.TaskState{model.StateNew, model.StateProgressing},
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+	got := map[uint]bool{tasks[0].ID: true, tasks[1].ID: true}
+	if !got[newTask.ID] || !got[progressingTask.ID] || got[doneTask.ID] {
+		t.Errorf("expected {New, Progressing}, got IDs %v", got)
 	}
 }
 
@@ -654,12 +676,11 @@ func TestListTasks_Query_ComposesWithFilters(t *testing.T) {
 		t.Fatalf("set state: %v", err)
 	}
 
-	state := model.StateProgressing
 	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{
 		Query:        "foo",
 		ParentID:     &parent.ID,
 		TagsSubsetOf: []string{"work"},
-		State:        &state,
+		States:       []model.TaskState{model.StateProgressing},
 	})
 	if err != nil {
 		t.Fatalf("list: %v", err)

@@ -137,12 +137,12 @@ type UpdateLinkOptions struct {
 // ListTasksOptions controls filtering and sorting for ListTasks.
 type ListTasksOptions struct {
 	IncludeArchived bool
-	IncludeSubtasks bool             // false = top-level only; true = all tasks (implied by ParentID)
-	ParentID        *uint            // filter to subtree rooted at this task (recursive, includes root)
-	State           *model.TaskState // nil = all states
-	Tags            []string         // AND logic: task must have all specified tags
-	Overdue         bool             // only tasks past due date
-	SortBy          string           // "priority" (default), "due", "created", "updated"
+	IncludeSubtasks bool              // false = top-level only; true = all tasks (implied by ParentID)
+	ParentID        *uint             // filter to subtree rooted at this task (recursive, includes root)
+	States          []model.TaskState // OR logic: task state must match any of these; empty = all states
+	Tags            []string          // AND logic: task must have all specified tags
+	Overdue         bool              // only tasks past due date
+	SortBy          string            // "priority" (default), "due", "created", "updated"
 	Limit           int
 	Offset          int
 

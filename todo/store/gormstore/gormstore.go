@@ -928,8 +928,8 @@ func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) 
 	if !opts.IncludeArchived {
 		q = q.Where("archived = ?", false)
 	}
-	if opts.State != nil {
-		q = q.Where("state = ?", *opts.State)
+	if len(opts.States) > 0 {
+		q = q.Where("state IN ?", opts.States)
 	}
 	if opts.Overdue {
 		q = q.Where("due_at IS NOT NULL AND due_at < ?", time.Now().UTC())

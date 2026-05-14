@@ -27,12 +27,16 @@ var taskListCmd = &cobra.Command{
 		opts.TagsSubsetOf, _ = cmd.Flags().GetStringSlice("tag-subset-of")
 		opts.Query, _ = cmd.Flags().GetString("query")
 
-		if stateStr, _ := cmd.Flags().GetString("state"); stateStr != "" {
-			state, err := normalizeState(stateStr)
-			if err != nil {
-				return err
+		if raw, _ := cmd.Flags().GetStringSlice("state"); len(raw) > 0 {
+			states := make([]model.TaskState, 0, len(raw))
+			for _, s := range raw {
+				st, err := normalizeState(s)
+				if err != nil {
+					return err
+				}
+				states = append(states, st)
 			}
-			opts.State = &state
+			opts.States = states
 		}
 
 		if parentStr, _ := cmd.Flags().GetString("parent"); parentStr != "" {
@@ -92,12 +96,6 @@ var taskListCmd = &cobra.Command{
 			return err
 		}
 
-		// If state filter is Blocked, also show what's blocking each task
-		if opts.State != nil && *opts.State == model.StateBlocked {
-			// Enhance with blocker info if not in JSON mode
-			// (JSON mode uses the raw task list)
-		}
-
 		outputTaskList(tasks)
 		return nil
 	},
@@ -107,7 +105,7 @@ func init() {
 	taskListCmd.Flags().Bool("all", false, "include archived tasks")
 	taskListCmd.Flags().Bool("subtasks", false, "include subtasks (flat list)")
 	taskListCmd.Flags().Bool("overdue", false, "only overdue tasks")
-	taskListCmd.Flags().String("state", "", "filter by state")
+	taskListCmd.Flags().StringSlice("state", nil, "filter by state (repeatable; OR logic)")
 	taskListCmd.Flags().String("parent", "", "filter to subtree of task ID")
 	taskListCmd.Flags().String("sort", "priority", "sort by: priority, due, created, updated")
 	taskListCmd.Flags().StringSlice("tag", nil, "filter by tag (AND logic, repeatable)")

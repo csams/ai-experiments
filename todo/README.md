@@ -83,6 +83,7 @@ go build -o todo .
 
 # Filtering
 ./todo task list --state blocked
+./todo task list --state progressing --state unblocked   # OR logic across states
 ./todo task list --tag backend --tag urgent
 ./todo task list --overdue
 ./todo task list --parent 1 --state blocked   # blocked tasks in subtree

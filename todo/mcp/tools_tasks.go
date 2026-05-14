@@ -95,7 +95,10 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 			"description, and link descriptions. Use `include` to opt into expensive per-item "+
 			"fields (description, notes, links, parent, children, blockers); by default each "+
 			"item carries only cheap bounded fields plus tags and a has_checkpoint flag."),
-		mcpgo.WithString("state", mcpgo.Description("Filter by state"), mcpgo.Enum("New", "Progressing", "Blocked", "Unblocked", "Done")),
+		mcpgo.WithArray("states",
+			mcpgo.Description("Filter by state (OR logic — task matches any listed state)"),
+			mcpgo.WithStringItems(mcpgo.Enum("New", "Progressing", "Blocked", "Unblocked", "Done")),
+			mcpgo.MaxItems(5)),
 		mcpgo.WithBoolean("include_archived", mcpgo.Description("Include archived tasks")),
 		mcpgo.WithBoolean("include_subtasks", mcpgo.Description("Include subtasks (flat list)")),
 		mcpgo.WithNumber("parent_id", mcpgo.Description("Filter to subtree of this task ID (includes root)"), mcpgo.Min(1)),
@@ -155,12 +158,16 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 			Query:           getStr(req, "query"),
 			Include:         inc,
 		}
-		if stateStr := getStr(req, "state"); stateStr != "" {
-			state := model.TaskState(stateStr)
-			if !model.ValidTaskStates[state] {
-				return errResult(fmt.Errorf("invalid state %q", stateStr)), nil
+		if raw := getStrSlice(req, "states"); len(raw) > 0 {
+			states := make([]model.TaskState, 0, len(raw))
+			for _, s := range raw {
+				st := model.TaskState(s)
+				if !model.ValidTaskStates[st] {
+					return errResult(fmt.Errorf("invalid state %q", s)), nil
+				}
+				states = append(states, st)
 			}
-			opts.State = &state
+			opts.States = states
 		}
 		if pid := getUint(req, "parent_id"); pid > 0 {
 			opts.ParentID = &pid
