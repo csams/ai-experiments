@@ -74,7 +74,7 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (28 core + 2 optional semantic)
+### Available MCP Tools (28 core + 1 optional semantic)
 
 **Tasks:** `create_task`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `set_task_archived`, `delete_task`, `set_parent`
 
@@ -90,9 +90,15 @@ Add to your MCP settings:
 
 **Bulk:** `bulk_update_state`, `bulk_update_priority`, `bulk_add_tags`, `bulk_remove_tags`
 
-**Semantic (when vector enabled):** `semantic_search`, `semantic_search_context`
+**Semantic (when vector enabled):** `semantic_search`
 
-Semantic search excludes archived items by default. Pass `include_archived: true` (MCP) or `--include-archived` (CLI) to include them.
+`semantic_search` runs in one of two modes:
+- **Query mode** — pass `query` (natural-language search string). Optional `task_id` scopes results to entities tied to a specific task.
+- **Context mode** — pass `related_to_task_id`. The tool aggregates that task's text and notes as the query and excludes the source task and its attached notes from results. Scope `task_id` is ignored in this mode.
+
+Exactly one of `query` and `related_to_task_id` must be provided; passing both or neither is rejected. Other options (`type`, `limit`, `include_archived`) apply to both modes. Semantic search excludes archived items by default. Pass `include_archived: true` (MCP) or `--include-archived` (CLI) to include them.
+
+**Migration callout (breaking change):** the `semantic_search_context` MCP tool is removed. Callers should pass `related_to_task_id` to `semantic_search` instead. The `Store.SemanticSearcher` Go interface keeps both `SemanticSearch` and `SemanticSearchContext` methods unchanged, so non-MCP callers (CLI `search context`) are unaffected.
 
 ### `list_tasks` Filtering
 
@@ -230,7 +236,7 @@ A task's embedding text includes its title, description, tags, link descriptions
 
 ### Chunking
 
-Long descriptions and notes are split into overlapping ~3000-rune chunks (200-rune overlap) before embedding, so content past `nomic-embed-text`'s ~2048-token training window stays searchable. Each chunk gets a header (task title + tags + state, or for notes "Note for: <parent title>") so mid-body chunks remain self-contained for retrieval. Storage row IDs are `task:<id>:<chunkIdx>` and `note:<id>:<chunkIdx>`. `semantic_search` and `semantic_search_context` aggregate per-doc: each result lists every matched chunk in `Chunks[]` (sorted by score) with the parent doc's best score as `Score`.
+Long descriptions and notes are split into overlapping ~3000-rune chunks (200-rune overlap) before embedding, so content past `nomic-embed-text`'s ~2048-token training window stays searchable. Each chunk gets a header (task title + tags + state, or for notes "Note for: <parent title>") so mid-body chunks remain self-contained for retrieval. Storage row IDs are `task:<id>:<chunkIdx>` and `note:<id>:<chunkIdx>`. `semantic_search` (in both query and context modes) aggregates per-doc: each result lists every matched chunk in `Chunks[]` (sorted by score) with the parent doc's best score as `Score`.
 
 **Migration callout (breaking storage change):** the row ID format changed and a `chunk_index` column was added to `vector_documents`. The schema migration is automatic on first connect. Old single-doc rows (`task:42`, `note:17`) won't be overwritten by the new chunked IDs, but the sync paths (`embedTasks`/`embedNotes`/`Reindex`) call `DeleteTaskDocs`/`DeleteNoteDocs` before re-upserting, which clears them out for any task or note that gets touched. The recommended migration step is **`todo vector reindex --clear`** — it drops the table outright, which also removes orphaned rows for tasks deleted before the upgrade. A plain `todo vector reindex` (no `--clear`) will clean up old rows for *current* tasks and notes but leaves orphans behind.
 
