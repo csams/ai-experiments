@@ -67,7 +67,7 @@ func (v *VectorSyncer) OnEvent(ctx context.Context, event store.StoreEvent) {
 func (v *VectorSyncer) syncTasks(ctx context.Context, event store.StoreEvent) error {
 	switch event.Type {
 	case "task.created", "task.updated", "task.state_changed",
-		"task.blockers_added", "task.blockers_removed",
+		"task.blockers_added", "task.blockers_removed", "task.blockers_updated",
 		"task.bulk_state_changed", "task.bulk_priority_changed":
 		return v.embedTasks(ctx, event.TaskIDs)
 

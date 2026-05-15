@@ -1365,6 +1365,119 @@ func (s *GormStore) RemoveBlockers(ctx context.Context, taskID uint, blockerIDs 
 	return &task, nil
 }
 
+// UpdateBlockers applies both removals and additions in a single transaction.
+// Removals are processed first so that when the same ID appears in both
+// arrays (a caller wrote `add: [X], remove: [X]`), the add wins — X ends up
+// as a blocker. This is the natural read of "swap in one call": the caller
+// is asserting the post-state, and the add list is treated as authoritative
+// for overlap. Validations and side effects (cycle detection, archive/done
+// checks, priority promotion) mirror AddBlockers for added IDs. Final state
+// is recomputed: any blockers remaining → Blocked; none remaining and task
+// was Blocked → Unblocked. Emits a single task.blockers_updated event.
+func (s *GormStore) UpdateBlockers(ctx context.Context, taskID uint, add, remove []uint) (*model.Task, error) {
+	if err := validateID(taskID); err != nil {
+		return nil, err
+	}
+	if len(add) == 0 && len(remove) == 0 {
+		return nil, &model.ValidationError{Field: "blockers", Message: "at least one of add or remove must be non-empty"}
+	}
+
+	db := s.db.WithContext(ctx)
+	var task model.Task
+	err := db.Transaction(func(tx *gorm.DB) error {
+		t, err := s.taskExists(tx, taskID)
+		if err != nil {
+			return err
+		}
+		task = *t
+		if task.Archived {
+			return model.ErrArchived
+		}
+
+		// Removals first — clears rows that might otherwise interfere with
+		// cycle detection on additions.
+		for _, bid := range remove {
+			if err := validateID(bid); err != nil {
+				return err
+			}
+			if err := tx.Where("task_id = ? AND blocker_id = ?", taskID, bid).Delete(&model.TaskBlocker{}).Error; err != nil {
+				return err
+			}
+		}
+
+		// Additions: validate, cycle-check, insert, promote priority.
+		for _, bid := range add {
+			if err := validateID(bid); err != nil {
+				return err
+			}
+			if bid == taskID {
+				return &model.ValidationError{Field: "add", Message: "cannot block self"}
+			}
+
+			blocker, err := s.taskExists(tx, bid)
+			if err != nil {
+				return fmt.Errorf("blocker %d: %w", bid, model.ErrNotFound)
+			}
+			if blocker.State == model.StateDone {
+				return &model.ValidationError{Field: "add", Message: fmt.Sprintf("task %d is Done", bid)}
+			}
+			if blocker.Archived {
+				return &model.ValidationError{Field: "add", Message: fmt.Sprintf("task %d is archived", bid)}
+			}
+
+			hasCycle, path, err := s.hasBlockingCycle(tx, taskID, bid)
+			if err != nil {
+				return err
+			}
+			if hasCycle {
+				return &model.CycleDetectedError{Path: path}
+			}
+
+			tb := model.TaskBlocker{TaskID: taskID, BlockerID: bid}
+			if err := tx.Where(tb).FirstOrCreate(&tb).Error; err != nil {
+				return err
+			}
+
+			if blocker.Priority > task.Priority {
+				if err := tx.Model(blocker).Update("priority", task.Priority).Error; err != nil {
+					return err
+				}
+				if err := s.propagatePriorityUp(tx, bid, task.Priority); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Recompute final state.
+		var count int64
+		if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", taskID).Count(&count).Error; err != nil {
+			return err
+		}
+		switch {
+		case count > 0:
+			// Force Blocked; idempotent if already Blocked.
+			return tx.Model(&task).Update("state", model.StateBlocked).Error
+		case task.State == model.StateBlocked:
+			// All blockers gone — auto-transition to Unblocked.
+			return tx.Model(&task).Update("state", model.StateUnblocked).Error
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	s.emit(ctx, store.StoreEvent{
+		Type:    "task.blockers_updated",
+		TaskIDs: []uint{taskID},
+	})
+
+	if err := db.Preload("Blockers").First(&task, taskID).Error; err != nil {
+		return nil, fmt.Errorf("reload task %d: %w", taskID, err)
+	}
+	return &task, nil
+}
+
 func (s *GormStore) SetParent(ctx context.Context, id uint, parentID *uint) error {
 	if err := validateID(id); err != nil {
 		return err

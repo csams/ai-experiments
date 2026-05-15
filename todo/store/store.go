@@ -24,6 +24,7 @@ type Store interface {
 	SetTaskState(ctx context.Context, id uint, state model.TaskState) (*model.Task, error) // non-Blocked only; Blocked returns ErrInvalidState
 	AddBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error)
 	RemoveBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error)
+	UpdateBlockers(ctx context.Context, taskID uint, add, remove []uint) (*model.Task, error) // combined add+remove in one txn; at least one of add/remove must be non-empty
 	SetParent(ctx context.Context, id uint, parentID *uint) error
 	ArchiveTask(ctx context.Context, id uint, archived bool) error
 	DeleteTask(ctx context.Context, id uint, opts DeleteTaskOptions) error

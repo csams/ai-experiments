@@ -213,3 +213,218 @@ func TestRemoveBlockers_NonBlockedIsNoop(t *testing.T) {
 		t.Fatalf("expected no-op, got error: %v", err)
 	}
 }
+
+func TestUpdateBlockers_AddAndRemoveInOneTxn(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C"})
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	if _, err := s.AddBlockers(ctx(), target.ID, []uint{a.ID, b.ID}); err != nil {
+		t.Fatalf("setup AddBlockers: %v", err)
+	}
+
+	// Swap A out for C in a single transaction.
+	result, err := s.UpdateBlockers(ctx(), target.ID, []uint{c.ID}, []uint{a.ID})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if result.State != model.StateBlocked {
+		t.Errorf("state = %q, want Blocked", result.State)
+	}
+	got := map[uint]bool{}
+	for _, blocker := range result.Blockers {
+		got[blocker.ID] = true
+	}
+	if got[a.ID] || !got[b.ID] || !got[c.ID] {
+		t.Errorf("blockers after swap: %+v; want {B,C} only", got)
+	}
+}
+
+func TestUpdateBlockers_RemovalOnlyAutoUnblocks(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	s.AddBlockers(ctx(), target.ID, []uint{a.ID})
+
+	result, err := s.UpdateBlockers(ctx(), target.ID, nil, []uint{a.ID})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if result.State != model.StateUnblocked {
+		t.Errorf("state = %q, want Unblocked", result.State)
+	}
+}
+
+func TestUpdateBlockers_AddOnlyEntersBlocked(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+
+	result, err := s.UpdateBlockers(ctx(), target.ID, []uint{a.ID}, nil)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if result.State != model.StateBlocked {
+		t.Errorf("state = %q, want Blocked", result.State)
+	}
+}
+
+func TestUpdateBlockers_EmptyBothRejected(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+
+	_, err := s.UpdateBlockers(ctx(), a.ID, nil, nil)
+	var ve *model.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError for empty add+remove, got %v", err)
+	}
+}
+
+func TestUpdateBlockers_CycleRejected(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	// A blocks B
+	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
+
+	// Try to make B block A → cycle.
+	_, err := s.UpdateBlockers(ctx(), a.ID, []uint{b.ID}, nil)
+	var ce *model.CycleDetectedError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected CycleDetectedError, got %v", err)
+	}
+}
+
+func TestUpdateBlockers_PromotesBlockerPriority(t *testing.T) {
+	s := newTestStore(t)
+	low, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "low", Priority: 10})
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "target", Priority: 1})
+
+	if _, err := s.UpdateBlockers(ctx(), target.ID, []uint{low.ID}, nil); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	detail, _ := s.GetTask(ctx(), low.ID, store.GetTaskOptions{})
+	if detail.Priority > 1 {
+		t.Errorf("blocker priority should be promoted to ≤ 1, got %d", detail.Priority)
+	}
+}
+
+func TestUpdateBlockers_ArchivedTargetRejected(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	if err := s.ArchiveTask(ctx(), target.ID, true); err != nil {
+		t.Fatalf("archive setup: %v", err)
+	}
+
+	_, err := s.UpdateBlockers(ctx(), target.ID, []uint{a.ID}, nil)
+	if !errors.Is(err, model.ErrArchived) {
+		t.Fatalf("expected ErrArchived, got %v", err)
+	}
+}
+
+func TestUpdateBlockers_DoneBlockerRejected(t *testing.T) {
+	s := newTestStore(t)
+	done, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "done"})
+	if _, err := s.SetTaskState(ctx(), done.ID, model.StateDone); err != nil {
+		t.Fatalf("set done: %v", err)
+	}
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+
+	_, err := s.UpdateBlockers(ctx(), target.ID, []uint{done.ID}, nil)
+	var ve *model.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError for Done blocker, got %v", err)
+	}
+}
+
+func TestUpdateBlockers_ArchivedBlockerRejected(t *testing.T) {
+	s := newTestStore(t)
+	archived, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "archived"})
+	if err := s.ArchiveTask(ctx(), archived.ID, true); err != nil {
+		t.Fatalf("archive setup: %v", err)
+	}
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+
+	_, err := s.UpdateBlockers(ctx(), target.ID, []uint{archived.ID}, nil)
+	var ve *model.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError for archived blocker, got %v", err)
+	}
+}
+
+func TestUpdateBlockers_SelfBlockRejected(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+
+	_, err := s.UpdateBlockers(ctx(), a.ID, []uint{a.ID}, nil)
+	var ve *model.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError for self-block, got %v", err)
+	}
+}
+
+func TestUpdateBlockers_BlockerNotFound(t *testing.T) {
+	s := newTestStore(t)
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+
+	_, err := s.UpdateBlockers(ctx(), target.ID, []uint{999999}, nil)
+	if !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing blocker, got %v", err)
+	}
+}
+
+// TestUpdateBlockers_OverlappingAddAndRemoveAddWins pins the documented
+// ordering semantic: when the same ID appears in both `add` and `remove`,
+// removals are processed first so the add re-creates the row. The blocker
+// ends up present after the call.
+func TestUpdateBlockers_OverlappingAddAndRemoveAddWins(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	if _, err := s.AddBlockers(ctx(), target.ID, []uint{a.ID}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	result, err := s.UpdateBlockers(ctx(), target.ID, []uint{a.ID}, []uint{a.ID})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if result.State != model.StateBlocked {
+		t.Errorf("state = %q, want Blocked (add wins for overlapping IDs)", result.State)
+	}
+	var got []uint
+	for _, blocker := range result.Blockers {
+		got = append(got, blocker.ID)
+	}
+	if len(got) != 1 || got[0] != a.ID {
+		t.Errorf("blockers = %v, want [%d] (add wins for overlapping IDs)", got, a.ID)
+	}
+}
+
+// TestUpdateBlockers_StructuralCycleStillRejected confirms that the
+// removals-first ordering doesn't bypass legitimate cycle detection. If
+// the proposed add would form a cycle independent of any removal, the
+// transaction must still abort.
+func TestUpdateBlockers_StructuralCycleStillRejected(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	if _, err := s.AddBlockers(ctx(), target.ID, []uint{a.ID}); err != nil {
+		t.Fatalf("setup A→T: %v", err)
+	}
+	// Make B blocked by T so adding B as T's blocker would close B→T→B.
+	if _, err := s.AddBlockers(ctx(), b.ID, []uint{target.ID}); err != nil {
+		t.Fatalf("setup T→B: %v", err)
+	}
+
+	// Swap T's blockers: drop A, add B. B→T→B cycle is structural — not
+	// transient — so removing A first does not help.
+	_, err := s.UpdateBlockers(ctx(), target.ID, []uint{b.ID}, []uint{a.ID})
+	var ce *model.CycleDetectedError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected CycleDetectedError for structural cycle, got %v", err)
+	}
+}

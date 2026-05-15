@@ -178,6 +178,115 @@ func TestSetTaskArchived_ArrayHappyPath(t *testing.T) {
 	}
 }
 
+// TestUpdateBlockers_AddOnly verifies the new merged tool dispatches to the
+// add path and transitions the task to Blocked.
+func TestUpdateBlockers_AddOnly(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	ctx := context.Background()
+	blocker, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "blocker"})
+	target, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "target"})
+
+	res := callTool(t, c, "update_blockers", map[string]any{
+		"task_id": float64(target.ID),
+		"add":     []any{float64(blocker.ID)},
+	})
+	if res.IsError {
+		t.Fatalf("update_blockers errored: %s", resultText(t, res))
+	}
+	detail, _ := s.GetTask(ctx, target.ID, store.GetTaskOptions{})
+	if string(detail.State) != "Blocked" {
+		t.Errorf("state = %q, want Blocked", detail.State)
+	}
+}
+
+// TestUpdateBlockers_RemoveOnly verifies the new merged tool dispatches to
+// the remove path and auto-transitions the task to Unblocked.
+func TestUpdateBlockers_RemoveOnly(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	ctx := context.Background()
+	blocker, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "blocker"})
+	target, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "target"})
+	if _, err := s.AddBlockers(ctx, target.ID, []uint{blocker.ID}); err != nil {
+		t.Fatalf("setup AddBlockers: %v", err)
+	}
+
+	res := callTool(t, c, "update_blockers", map[string]any{
+		"task_id": float64(target.ID),
+		"remove":  []any{float64(blocker.ID)},
+	})
+	if res.IsError {
+		t.Fatalf("update_blockers errored: %s", resultText(t, res))
+	}
+	detail, _ := s.GetTask(ctx, target.ID, store.GetTaskOptions{})
+	if string(detail.State) != "Unblocked" {
+		t.Errorf("state = %q, want Unblocked", detail.State)
+	}
+}
+
+// TestUpdateBlockers_SwapInOneCall verifies combined add+remove works in a
+// single MCP call (the headline benefit of the consolidation).
+func TestUpdateBlockers_SwapInOneCall(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	ctx := context.Background()
+	old, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "old"})
+	new_, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "new"})
+	target, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "target"})
+	s.AddBlockers(ctx, target.ID, []uint{old.ID})
+
+	res := callTool(t, c, "update_blockers", map[string]any{
+		"task_id": float64(target.ID),
+		"add":     []any{float64(new_.ID)},
+		"remove":  []any{float64(old.ID)},
+	})
+	if res.IsError {
+		t.Fatalf("update_blockers errored: %s", resultText(t, res))
+	}
+	detail, _ := s.GetTask(ctx, target.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	got := map[uint]bool{}
+	for _, b := range detail.Blockers {
+		got[b.ID] = true
+	}
+	if got[old.ID] || !got[new_.ID] {
+		t.Errorf("expected {new} only, got %v", got)
+	}
+}
+
+// TestUpdateBlockers_EmptyBothRejected verifies the MCP layer rejects the
+// no-op call shape before reaching the Store.
+func TestUpdateBlockers_EmptyBothRejected(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	a, _ := s.CreateTask(context.Background(), store.CreateTaskOptions{Title: "A"})
+
+	res := callTool(t, c, "update_blockers", map[string]any{
+		"task_id": float64(a.ID),
+	})
+	if !res.IsError {
+		t.Fatalf("expected error for empty add+remove; got: %s", resultText(t, res))
+	}
+}
+
+// TestUpdateBlockers_OldToolsRemoved confirms add_blockers and remove_blockers
+// are no longer in the server's tool registry.
+func TestUpdateBlockers_OldToolsRemoved(t *testing.T) {
+	c, _ := newMCPTestClient(t)
+	list, err := c.ListTools(context.Background(), mcpgo.ListToolsRequest{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	have := map[string]bool{}
+	for _, tool := range list.Tools {
+		have[tool.Name] = true
+	}
+	for _, removed := range []string{"add_blockers", "remove_blockers"} {
+		if have[removed] {
+			t.Errorf("tool %q is still registered", removed)
+		}
+	}
+	if !have["update_blockers"] {
+		t.Errorf("update_blockers should be registered, got tools: %v", have)
+	}
+}
+
 // TestSetTaskArchived_MidArrayFailureLeavesPrefix verifies the partial-failure
 // behavior documented in the tool description: when one ID fails, earlier IDs
 // remain in their new state.

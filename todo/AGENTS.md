@@ -74,9 +74,9 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (25 core + 1 optional semantic)
+### Available MCP Tools (24 core + 1 optional semantic)
 
-**Tasks:** `create_task`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `set_task_priority`, `add_blockers`, `remove_blockers`, `set_task_archived`, `delete_task`, `set_parent`
+**Tasks:** `create_task`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `set_task_priority`, `update_blockers`, `set_task_archived`, `delete_task`, `set_parent`
 
 `create_task` accepts an optional `parent_id` (omit for top-level, set to create a subtask under an existing non-archived parent) and an optional `links` array. Each link item is `{type, url, description}` (description optional). Inline links are inserted in the same transaction as the task, so any link-validation failure rolls the whole call back. Only one `task.created` event fires regardless of link count — the vector syncer re-embeds the task once with link descriptions included. Prefer inline `links` over per-link `add_link` calls when creating a task that already has its references in hand: it is atomic and avoids the per-link re-embed churn. `create_task` returns full task detail by default; pass an `include` array to restrict expensive fields.
 
@@ -99,6 +99,8 @@ Add to your MCP settings:
 Exactly one of `query` and `related_to_task_id` must be provided; passing both or neither is rejected. Other options (`type`, `limit`, `include_archived`) apply to both modes. Semantic search excludes archived items by default. Pass `include_archived: true` (MCP) or `--include-archived` (CLI) to include them.
 
 **Migration callout (breaking change):** the `semantic_search_context` MCP tool is removed. Callers should pass `related_to_task_id` to `semantic_search` instead. The `Store.SemanticSearcher` Go interface keeps both `SemanticSearch` and `SemanticSearchContext` methods unchanged, so non-MCP callers (CLI `search context`) are unaffected.
+
+**Migration callout (breaking change — `update_blockers`):** the `add_blockers` and `remove_blockers` MCP tools are removed. Use `update_blockers(task_id, add?, remove?)` instead; at least one of `add`/`remove` must be non-empty. Removals are processed first so a blocker can be swapped in one call without tripping cycle detection on the stale row. Validations are unchanged: no self-blocking or cycles, blocker cannot be Done or archived, blocker priority is promoted, state transitions to Blocked when any blockers remain and auto-Unblocked when all are removed. A new `Store.UpdateBlockers(ctx, taskID, add, remove)` method backs it; `Store.AddBlockers` and `Store.RemoveBlockers` are unchanged so CLI `task block`/`task unblock` continue to work.
 
 **Migration callouts (breaking changes — `bulk_*` fold):**
 - The four `bulk_update_state`, `bulk_update_priority`, `bulk_add_tags`, and `bulk_remove_tags` MCP tools are removed. Their array-of-IDs behavior is now the default on `set_task_state`, `set_task_priority` (new), `add_tags`, and `remove_tags`.
@@ -150,10 +152,10 @@ Exactly one of `query` and `related_to_task_id` must be provided; passing both o
 
 `New` -> `Progressing` -> `Done`
 
-A task can be `Blocked` (via `add_blockers`) or `Unblocked` (auto-transition when all blockers complete).
+A task can be `Blocked` (via `update_blockers` with an `add` list) or `Unblocked` (auto-transition when all blockers are removed).
 
 - Use `set_task_state` for New, Progressing, Unblocked, Done.
-- Use `add_blockers` / `remove_blockers` to manage Blocked state.
+- Use `update_blockers` (with `add` and/or `remove` arrays) to manage Blocked state. Both lists can be supplied in one call to swap blockers atomically.
 - Setting Done auto-unblocks dependents with no remaining blockers.
 
 ## Priority

@@ -316,7 +316,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// set_task_state
 	srv.AddTool(mcpgo.NewTool("set_task_state",
 		mcpgo.WithDescription("Set the state of one or more tasks (1..100 IDs). Atomic across the entire array; "+
-			"processes tasks in ascending ID order. Cannot set Blocked directly — use add_blockers instead. "+
+			"processes tasks in ascending ID order. Cannot set Blocked directly — use update_blockers instead. "+
 			"Setting Done auto-unblocks dependents whose blockers are all complete. "+
 			"Returns updated tasks. Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
@@ -364,46 +364,37 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		return textResult(toJSON(tasks)), nil
 	})
 
-	// add_blockers
-	srv.AddTool(mcpgo.NewTool("add_blockers",
-		mcpgo.WithDescription("Add blocking dependencies. Transitions task to Blocked state. " +
-			"Validates no self-blocking or cycles. Blocker must not be Done or archived. " +
-			"Promotes blocker priority to at least match blocked task. " +
-			"Empty descriptions are omitted from the JSON response."),
-		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID to block"), mcpgo.Min(1)),
-		mcpgo.WithArray("blocker_ids", mcpgo.Required(), mcpgo.Description("IDs of tasks that block this one"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
-	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "task_id")
-		if err != nil {
-			return errResult(err), nil
-		}
-		blockerIDs, err := requireUintSlice(req, "blocker_ids")
-		if err != nil {
-			return errResult(err), nil
-		}
-		task, err := s.AddBlockers(ctx, id, blockerIDs)
-		if err != nil {
-			return errResult(err), nil
-		}
-		return textResult(toJSON(task)), nil
-	})
-
-	// remove_blockers
-	srv.AddTool(mcpgo.NewTool("remove_blockers",
-		mcpgo.WithDescription("Remove specific blockers. Auto-transitions to Unblocked if no blockers remain. " +
+	// update_blockers
+	srv.AddTool(mcpgo.NewTool("update_blockers",
+		mcpgo.WithDescription("Add and/or remove blocker dependencies on a task in one transaction. "+
+			"At least one of `add` or `remove` must be non-empty. "+
+			"Removals are processed first so a blocker can be swapped (drop + add) "+
+			"without tripping cycle detection on a stale row. "+
+			"Adding blockers: validates no self-blocking and no cycles; each blocker must not be Done or archived; "+
+			"blocker priority is promoted to at least match the blocked task. "+
+			"State transitions: if any blockers remain after the update the task is set to Blocked; "+
+			"if all blockers are gone and the task was Blocked it transitions to Unblocked. "+
 			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
-		mcpgo.WithArray("blocker_ids", mcpgo.Required(), mcpgo.Description("Blocker IDs to remove"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
+		mcpgo.WithArray("add", mcpgo.Description("Blocker IDs to add (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
+		mcpgo.WithArray("remove", mcpgo.Description("Blocker IDs to remove (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
-		blockerIDs, err := requireUintSlice(req, "blocker_ids")
-		if err != nil {
-			return errResult(err), nil
+		add := getUintSlice(req, "add")
+		remove := getUintSlice(req, "remove")
+		if len(add) == 0 && len(remove) == 0 {
+			return errResult(fmt.Errorf("at least one of add or remove must be non-empty")), nil
 		}
-		task, err := s.RemoveBlockers(ctx, id, blockerIDs)
+		if len(add) > maxBulkMCPIDs {
+			return errResult(fmt.Errorf("add: max %d per call", maxBulkMCPIDs)), nil
+		}
+		if len(remove) > maxBulkMCPIDs {
+			return errResult(fmt.Errorf("remove: max %d per call", maxBulkMCPIDs)), nil
+		}
+		task, err := s.UpdateBlockers(ctx, id, add, remove)
 		if err != nil {
 			return errResult(err), nil
 		}
