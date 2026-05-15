@@ -154,18 +154,27 @@ Exactly one of `query` and `related_to_task_id` must be provided; passing both o
 
 A task can be `Blocked` (via `update_blockers` with an `add` list) or `Unblocked` (auto-transition when all blockers are removed).
 
-- Use `set_task_state` for New, Progressing, Unblocked, Done.
+- Use `set_task_state` for New, Progressing, Done.
 - Use `update_blockers` (with `add` and/or `remove` arrays) to manage Blocked state. Both lists can be supplied in one call to swap blockers atomically.
+- Unblocked is an auto-transition — it fires when a Blocked task's last blocker is removed (via `update_blockers`, `task unblock`, or a Done cascade). It is not directly settable.
 - Setting Done auto-unblocks dependents with no remaining blockers.
 
 **Migration callout (breaking change — `set_task_state` blocker preservation):**
-Transitioning a Blocked task to any non-Done state (e.g. `Progressing`, `New`, or explicitly `Unblocked`) now requires the caller to opt into dropping the outstanding blocker rows. Previously the rows were silently deleted on every state change, which masked dependency loss.
+Transitioning a Blocked task to any non-Done state (e.g. `Progressing`, `New`) now requires the caller to opt into dropping the outstanding blocker rows. Previously the rows were silently deleted on every state change, which masked dependency loss.
 
 - MCP: pass `force_clear_blockers: true` on `set_task_state` to drop blockers as part of the transition. Without it, the call returns an error wrapping `ErrInvalidState` and the task's state and blocker rows are unchanged.
 - CLI: `todo task state <id> <state> --force-clear-blockers` and `todo task bulk-state --force-clear-blockers`.
 - Done is still terminal — Done transitions always clear the task's blocker rows and auto-unblock dependents, no flag required.
 - Non-Blocked tasks are unaffected (there are no blocker rows to preserve).
 - Store interface change: `Store.SetTaskState` and `Store.BulkUpdateState` now take a `store.SetTaskStateOptions{ForceClearBlockers}` argument. The CLI commands above route through it.
+
+**Migration callout (breaking change — `Unblocked` is no longer directly settable):**
+The `set_task_state` MCP enum drops `Unblocked`; the store rejects it with `ErrInvalidState`. `Unblocked` was always meant to be a transient auto-transition that fires when a Blocked task's last blocker is removed, not a target a user picks. Manually setting it had no well-defined meaning.
+
+- MCP: the `state` enum on `set_task_state` is now `"New" | "Progressing" | "Done"`. Calls with `"Unblocked"` are rejected at the schema layer.
+- Store: `Store.SetTaskState(_, _, StateUnblocked, _)` and `Store.BulkUpdateState(_, _, StateUnblocked, _)` return an error wrapping `ErrInvalidState` regardless of the current state.
+- CLI: the `--state` parse path accepts the string `Unblocked` (for backward-compatible flag parsing) but the store rejects it with a clear error message pointing to `Progressing` or `New`.
+- Auto-transition path is unchanged: removing the last blocker (via `update_blockers`, `task unblock`, or a Done cascade) still transitions a Blocked task to `Unblocked` automatically. `Unblocked` remains a valid filter value for `list_tasks states`.
 
 ## Priority
 

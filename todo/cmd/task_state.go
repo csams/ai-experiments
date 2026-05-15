@@ -9,15 +9,18 @@ import (
 
 var taskStateCmd = &cobra.Command{
 	Use:   "state <id> <state>",
-	Short: "Set a task's state (New, Progressing, Unblocked, Done)",
+	Short: "Set a task's state (New, Progressing, Done)",
 	Long: `Set a task's state.
 
-Done is terminal and always clears the task's blocker rows
-(auto-unblocking dependents whose blocker counts hit zero).
-Transitioning a Blocked task to a non-Done state is rejected
-by default to prevent silent loss of dependency information;
-pass --force-clear-blockers to drop the blockers as part of
-the transition.`,
+Blocked is not directly settable — use 'todo task block' / 'todo task unblock'
+or the MCP update_blockers tool. Unblocked is an auto-transition that fires
+when a Blocked task's last blocker is removed; set Progressing or New instead.
+
+Done is terminal and always clears the task's blocker rows (auto-unblocking
+dependents whose blocker counts hit zero). Transitioning a Blocked task to
+a non-Done state is rejected by default to prevent silent loss of
+dependency information; pass --force-clear-blockers to drop the blockers
+as part of the transition.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, _, err := openStore()

@@ -316,7 +316,8 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// set_task_state
 	srv.AddTool(mcpgo.NewTool("set_task_state",
 		mcpgo.WithDescription("Set the state of one or more tasks (1..100 IDs). Atomic across the entire array; "+
-			"processes tasks in ascending ID order. Cannot set Blocked directly — use update_blockers instead. "+
+			"processes tasks in ascending ID order. Cannot set Blocked or Unblocked directly — Blocked is set via "+
+			"update_blockers; Unblocked is an auto-transition fired when a Blocked task's last blocker is removed. "+
 			"Setting Done is terminal: it always clears the task's blocker rows and auto-unblocks dependents whose "+
 			"remaining blockers all complete. "+
 			"Transitioning a Blocked task to any non-Done state is rejected by default to prevent silent loss of "+
@@ -324,7 +325,7 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 			"the transition. A single rejected task aborts the whole batch. "+
 			"Returns updated tasks. Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
-		mcpgo.WithString("state", mcpgo.Required(), mcpgo.Description("Target state"), mcpgo.Enum("New", "Progressing", "Unblocked", "Done")),
+		mcpgo.WithString("state", mcpgo.Required(), mcpgo.Description("Target state"), mcpgo.Enum("New", "Progressing", "Done")),
 		mcpgo.WithBoolean("force_clear_blockers", mcpgo.Description(
 			"When true, allow transitioning a Blocked task to a non-Done state by dropping its outstanding blocker rows. "+
 				"Has no effect for Done transitions (terminal) or for tasks that are not currently Blocked.")),

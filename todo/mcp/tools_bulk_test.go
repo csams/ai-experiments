@@ -115,6 +115,24 @@ func TestSetTaskState_RejectsBlocked(t *testing.T) {
 	}
 }
 
+// TestSetTaskState_RejectsUnblocked — the schema enum drops Unblocked
+// after PR-4, so the MCP layer must refuse the call. The store would
+// reject it anyway with ErrInvalidState, but the schema rejection is
+// preferred so the error surfaces with a clearer "invalid enum value"
+// message at the boundary.
+func TestSetTaskState_RejectsUnblocked(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	a, _ := s.CreateTask(context.Background(), store.CreateTaskOptions{Title: "A"})
+
+	res := callTool(t, c, "set_task_state", map[string]any{
+		"ids":   []any{float64(a.ID)},
+		"state": "Unblocked",
+	})
+	if !res.IsError {
+		t.Fatalf("expected rejection for Unblocked state; got: %s", resultText(t, res))
+	}
+}
+
 // TestSetTaskState_BlockedToProgressingRejectedByDefault — exercises PR-1's
 // new behavior at the MCP boundary: transitioning a Blocked task to
 // Progressing without force_clear_blockers must return an error, and the

@@ -1160,6 +1160,14 @@ func (s *GormStore) SetTaskState(ctx context.Context, id uint, state model.TaskS
 	if state == model.StateBlocked {
 		return nil, fmt.Errorf("use AddBlockers to set Blocked state: %w", model.ErrInvalidState)
 	}
+	if state == model.StateUnblocked {
+		// Unblocked is a transient auto-transition fired when the last
+		// blocker on a Blocked task is removed (via RemoveBlockers,
+		// UpdateBlockers, or a Done cascade). Setting it directly has no
+		// well-defined meaning — Progressing or New is what the caller
+		// almost always wants.
+		return nil, fmt.Errorf("Unblocked is an auto-transition (fires when blockers are removed); set Progressing or New instead: %w", model.ErrInvalidState)
+	}
 	if !model.ValidTaskStates[state] {
 		return nil, &model.ValidationError{Field: "state", Message: fmt.Sprintf("invalid state: %s", state)}
 	}
@@ -1833,6 +1841,11 @@ func (s *GormStore) BulkUpdateState(ctx context.Context, ids []uint, state model
 	}
 	if state == model.StateBlocked {
 		return nil, fmt.Errorf("use AddBlockers for Blocked state: %w", model.ErrInvalidState)
+	}
+	if state == model.StateUnblocked {
+		// See SetTaskState — Unblocked is an auto-transition, not a settable
+		// target.
+		return nil, fmt.Errorf("Unblocked is an auto-transition (fires when blockers are removed); set Progressing or New instead: %w", model.ErrInvalidState)
 	}
 	if !model.ValidTaskStates[state] {
 		return nil, &model.ValidationError{Field: "state", Message: "invalid state"}

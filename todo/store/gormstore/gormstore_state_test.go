@@ -31,6 +31,33 @@ func TestSetTaskState_BlockedReturnsError(t *testing.T) {
 	}
 }
 
+// TestSetTaskState_UnblockedReturnsError — Unblocked is an auto-transition
+// fired when a Blocked task's last blocker is removed. It is not a settable
+// target; the store rejects it regardless of the current state.
+func TestSetTaskState_UnblockedReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	// Task in default New state: Unblocked target must still be rejected.
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	_, err := s.SetTaskState(ctx(), a.ID, model.StateUnblocked, store.SetTaskStateOptions{})
+	if !errors.Is(err, model.ErrInvalidState) {
+		t.Errorf("New -> Unblocked: expected ErrInvalidState, got %v", err)
+	}
+
+	// Even a task that *is* currently Blocked can't be directly set Unblocked:
+	// the user should remove blockers (which auto-Unblocks) or pass through
+	// the force_clear_blockers path on Progressing/New.
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	blocker, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "blocker"})
+	if _, err := s.AddBlockers(ctx(), b.ID, []uint{blocker.ID}); err != nil {
+		t.Fatalf("setup AddBlockers: %v", err)
+	}
+	_, err = s.SetTaskState(ctx(), b.ID, model.StateUnblocked,
+		store.SetTaskStateOptions{ForceClearBlockers: true})
+	if !errors.Is(err, model.ErrInvalidState) {
+		t.Errorf("Blocked -> Unblocked (even with force): expected ErrInvalidState, got %v", err)
+	}
+}
+
 func TestSetTaskState_ArchivedReturnsError(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})

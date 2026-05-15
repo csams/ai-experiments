@@ -58,6 +58,19 @@ func TestBulkUpdateState_RejectsBlocked(t *testing.T) {
 	}
 }
 
+// TestBulkUpdateState_RejectsUnblocked — bulk-path mirror of
+// TestSetTaskState_UnblockedReturnsError: Unblocked is an auto-transition,
+// not a settable target.
+func TestBulkUpdateState_RejectsUnblocked(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
+
+	_, err := s.BulkUpdateState(ctx(), []uint{1}, model.StateUnblocked, store.SetTaskStateOptions{})
+	if !errors.Is(err, model.ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState, got %v", err)
+	}
+}
+
 func TestBulkUpdateState_RejectsArchived(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
