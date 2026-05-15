@@ -74,11 +74,13 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (28 core + 1 optional semantic)
+### Available MCP Tools (25 core + 1 optional semantic)
 
-**Tasks:** `create_task`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `set_task_archived`, `delete_task`, `set_parent`
+**Tasks:** `create_task`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `set_task_priority`, `add_blockers`, `remove_blockers`, `set_task_archived`, `delete_task`, `set_parent`
 
 `create_task` accepts an optional `parent_id` (omit for top-level, set to create a subtask under an existing non-archived parent) and an optional `links` array. Each link item is `{type, url, description}` (description optional). Inline links are inserted in the same transaction as the task, so any link-validation failure rolls the whole call back. Only one `task.created` event fires regardless of link count — the vector syncer re-embeds the task once with link descriptions included. Prefer inline `links` over per-link `add_link` calls when creating a task that already has its references in hand: it is atomic and avoids the per-link re-embed churn. `create_task` returns full task detail by default; pass an `include` array to restrict expensive fields.
+
+`set_task_state`, `set_task_priority`, and `set_task_archived` all accept an `ids` array (1..100). Single-task callers pass `ids: [42]`. The mutations are atomic across the whole array (except `set_task_archived`, which is per-task atomic but not cross-task atomic — see its tool description). `set_task_priority` promotes blockers to at least match the priority of any task they block.
 
 **Notes:** `add_note`, `update_note`, `list_notes`, `delete_note`
 
@@ -86,9 +88,7 @@ Add to your MCP settings:
 
 **Checkpoints:** `set_checkpoint`, `get_checkpoint`, `delete_checkpoint`
 
-**Tags:** `add_tags`, `remove_tags`
-
-**Bulk:** `bulk_update_state`, `bulk_update_priority`, `bulk_add_tags`, `bulk_remove_tags`
+**Tags:** `add_tags`, `remove_tags` — both accept `ids` (array, 1..100) and `tags`. Atomic across the whole array.
 
 **Semantic (when vector enabled):** `semantic_search`
 
@@ -99,6 +99,13 @@ Add to your MCP settings:
 Exactly one of `query` and `related_to_task_id` must be provided; passing both or neither is rejected. Other options (`type`, `limit`, `include_archived`) apply to both modes. Semantic search excludes archived items by default. Pass `include_archived: true` (MCP) or `--include-archived` (CLI) to include them.
 
 **Migration callout (breaking change):** the `semantic_search_context` MCP tool is removed. Callers should pass `related_to_task_id` to `semantic_search` instead. The `Store.SemanticSearcher` Go interface keeps both `SemanticSearch` and `SemanticSearchContext` methods unchanged, so non-MCP callers (CLI `search context`) are unaffected.
+
+**Migration callouts (breaking changes — `bulk_*` fold):**
+- The four `bulk_update_state`, `bulk_update_priority`, `bulk_add_tags`, and `bulk_remove_tags` MCP tools are removed. Their array-of-IDs behavior is now the default on `set_task_state`, `set_task_priority` (new), `add_tags`, and `remove_tags`.
+- `set_task_state`, `add_tags`, and `remove_tags` no longer accept a singular `task_id`; they accept `ids: number[]` (1..100). Single-task callers pass `ids: [42]`.
+- `set_task_state` now returns `[]Task` (always an array), not a single `Task`. Single-ID callers must read `result[0]`. The same applies to `set_task_priority`.
+- `set_task_priority` is a new tool symmetric with `set_task_state`. The existing `update_task.priority` field is still the patch path when changing priority alongside other fields on one task.
+- The `Store.AddTags`, `Store.RemoveTags`, `Store.SetTaskState`, and `Store.Bulk*` Go methods are all unchanged, so the CLI commands (`task tag`/`task untag`/`task state`/`task bulk-state`/`task bulk-priority`/`task bulk-add-tags`/`task bulk-remove-tags`) continue to work.
 
 ### `list_tasks` Filtering
 

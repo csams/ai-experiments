@@ -21,7 +21,6 @@ func NewServer(s store.Store, ss store.SemanticSearcher) *server.MCPServer {
 	registerLinkTools(srv, s)
 	registerCheckpointTools(srv, s)
 	registerTagTools(srv, s)
-	registerBulkTools(srv, s)
 
 	if ss != nil {
 		registerSemanticTools(srv, ss)

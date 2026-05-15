@@ -10,6 +10,13 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 )
 
+// maxBulkMCPIDs caps the number of IDs accepted by tools that take an `ids`
+// array (get_tasks, set_task_state, set_task_priority, set_task_archived,
+// add_tags, remove_tags). The same limit is enforced schema-side via
+// mcpgo.MaxItems(100); this constant is defense-in-depth and the source of
+// truth for the error message.
+const maxBulkMCPIDs = 100
+
 // getStr extracts a string argument, returns "" if missing.
 func getStr(req mcpgo.CallToolRequest, key string) string {
 	args := req.GetArguments()

@@ -315,25 +315,53 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// set_task_state
 	srv.AddTool(mcpgo.NewTool("set_task_state",
-		mcpgo.WithDescription("Set task state. Cannot set Blocked directly — use add_blockers instead. " +
-			"Setting Done auto-unblocks dependents whose blockers are all complete. " +
-			"Empty descriptions are omitted from the JSON response."),
-		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
+		mcpgo.WithDescription("Set the state of one or more tasks (1..100 IDs). Atomic across the entire array; "+
+			"processes tasks in ascending ID order. Cannot set Blocked directly — use add_blockers instead. "+
+			"Setting Done auto-unblocks dependents whose blockers are all complete. "+
+			"Returns updated tasks. Empty descriptions are omitted from the JSON response."),
+		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 		mcpgo.WithString("state", mcpgo.Required(), mcpgo.Description("Target state"), mcpgo.Enum("New", "Progressing", "Unblocked", "Done")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		id, err := requireUint(req, "task_id")
+		ids, err := requireUintSlice(req, "ids")
 		if err != nil {
 			return errResult(err), nil
+		}
+		if len(ids) > maxBulkMCPIDs {
+			return errResult(fmt.Errorf("ids: max %d per call", maxBulkMCPIDs)), nil
 		}
 		state, err := getState(req, "state")
 		if err != nil {
 			return errResult(err), nil
 		}
-		task, err := s.SetTaskState(ctx, id, state)
+		tasks, err := s.BulkUpdateState(ctx, ids, state)
 		if err != nil {
 			return errResult(err), nil
 		}
-		return textResult(toJSON(task)), nil
+		return textResult(toJSON(tasks)), nil
+	})
+
+	// set_task_priority
+	srv.AddTool(mcpgo.NewTool("set_task_priority",
+		mcpgo.WithDescription("Set the priority of one or more tasks (1..100 IDs). Atomic across the entire array; "+
+			"processes tasks in ascending ID order. "+
+			"Lower number = higher importance; negative values are allowed. "+
+			"Blockers are automatically promoted to at least match the priority of any task they block. "+
+			"Returns updated tasks. Empty descriptions are omitted from the JSON response."),
+		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
+		mcpgo.WithNumber("priority", mcpgo.Required(), mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		ids, err := requireUintSlice(req, "ids")
+		if err != nil {
+			return errResult(err), nil
+		}
+		if len(ids) > maxBulkMCPIDs {
+			return errResult(fmt.Errorf("ids: max %d per call", maxBulkMCPIDs)), nil
+		}
+		tasks, err := s.BulkUpdatePriority(ctx, ids, getInt(req, "priority"))
+		if err != nil {
+			return errResult(err), nil
+		}
+		return textResult(toJSON(tasks)), nil
 	})
 
 	// add_blockers
