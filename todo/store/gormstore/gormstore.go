@@ -354,6 +354,47 @@ func validateLinkDescription(desc string) (string, error) {
 	return clean, nil
 }
 
+// validateLinkInputs sanitizes and validates a slice of LinkInput, returning a
+// cleaned copy in input order. Empty/nil input returns nil, nil. Validation
+// errors are prefixed with the failing index (e.g. "links[3].url") so callers
+// passing batches can localize the offending entry.
+func validateLinkInputs(links []model.LinkInput) ([]model.LinkInput, error) {
+	if len(links) == 0 {
+		return nil, nil
+	}
+	cleaned := make([]model.LinkInput, len(links))
+	for i, in := range links {
+		if !model.ValidLinkTypes[in.Type] {
+			return nil, &model.ValidationError{
+				Field:   fmt.Sprintf("links[%d].type", i),
+				Message: fmt.Sprintf("invalid link type: %s", in.Type),
+			}
+		}
+		url, err := validateLinkURL(in.URL)
+		if err != nil {
+			return nil, prefixValidationField(err, fmt.Sprintf("links[%d]", i))
+		}
+		desc, err := validateLinkDescription(in.Description)
+		if err != nil {
+			return nil, prefixValidationField(err, fmt.Sprintf("links[%d]", i))
+		}
+		cleaned[i] = model.LinkInput{Type: in.Type, URL: url, Description: desc}
+	}
+	return cleaned, nil
+}
+
+// prefixValidationField rewrites a *model.ValidationError to prepend a prefix
+// onto its Field (e.g. "url" → "links[3].url"). Non-ValidationError errors are
+// returned unchanged.
+func prefixValidationField(err error, prefix string) error {
+	var ve *model.ValidationError
+	if errors.As(err, &ve) {
+		ve.Field = prefix + "." + ve.Field
+		return ve
+	}
+	return err
+}
+
 func validateSearchQuery(q string) (string, error) {
 	clean, err := textutil.Sanitize(q)
 	if err != nil {
@@ -577,84 +618,48 @@ func (s *GormStore) checkExternalBlockers(tx *gorm.DB, taskIDs []uint) error {
 
 // --- CRUD: Tasks ---
 
-func (s *GormStore) CreateTask(ctx context.Context, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error) {
-	var err error
-	if title, err = validateTitle(title); err != nil {
-		return nil, err
-	}
-	if description, err = validateDescription(description); err != nil {
-		return nil, err
-	}
-	if tags, err = validateTags(tags); err != nil {
-		return nil, err
-	}
-
-	task := model.Task{
-		Title:       title,
-		Description: model.PtrIfNonEmpty(description),
-		Priority:    priority,
-		State:       model.StateNew,
-		DueAt:       dueAt,
-	}
-
-	db := s.db.WithContext(ctx)
-	err = db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&task).Error; err != nil {
-			return err
-		}
-		for _, tag := range tags {
-			tt := model.TaskTag{TaskID: task.ID, Tag: tag}
-			if err := tx.Create(&tt).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+// CreateTask creates a task (top-level if opts.ParentID is nil, subtask otherwise).
+// Tags and links are inserted in the same transaction; any validation failure rolls
+// the whole operation back. Only one task.created event is emitted regardless of
+// inline tag/link counts (matching the existing tag-on-create convention).
+func (s *GormStore) CreateTask(ctx context.Context, opts store.CreateTaskOptions) (*model.Task, error) {
+	title, err := validateTitle(opts.Title)
 	if err != nil {
 		return nil, err
 	}
-
-	// Reload with tags
-	if err := db.Preload("Tags").First(&task, task.ID).Error; err != nil {
-		return nil, fmt.Errorf("reload task %d: %w", task.ID, err)
-	}
-
-	s.emit(ctx, store.StoreEvent{
-		Type:    "task.created",
-		TaskIDs: []uint{task.ID},
-	})
-
-	return &task, nil
-}
-
-func (s *GormStore) CreateSubtask(ctx context.Context, parentID uint, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error) {
-	if err := validateID(parentID); err != nil {
+	description, err := validateDescription(opts.Description)
+	if err != nil {
 		return nil, err
 	}
-	var err error
-	if title, err = validateTitle(title); err != nil {
+	tags, err := validateTags(opts.Tags)
+	if err != nil {
 		return nil, err
 	}
-	if description, err = validateDescription(description); err != nil {
+	links, err := validateLinkInputs(opts.Links)
+	if err != nil {
 		return nil, err
 	}
-	if tags, err = validateTags(tags); err != nil {
-		return nil, err
+	if opts.ParentID != nil {
+		if err := validateID(*opts.ParentID); err != nil {
+			return nil, err
+		}
 	}
 
 	task := model.Task{
 		Title:       title,
 		Description: model.PtrIfNonEmpty(description),
-		Priority:    priority,
+		Priority:    opts.Priority,
 		State:       model.StateNew,
-		DueAt:       dueAt,
-		ParentID:    &parentID,
+		DueAt:       opts.DueAt,
+		ParentID:    opts.ParentID,
 	}
 
 	db := s.db.WithContext(ctx)
 	err = db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.taskExistsActive(tx, parentID); err != nil {
-			return err
+		if opts.ParentID != nil {
+			if _, err := s.taskExistsActive(tx, *opts.ParentID); err != nil {
+				return err
+			}
 		}
 		if err := tx.Create(&task).Error; err != nil {
 			return err
@@ -665,14 +670,24 @@ func (s *GormStore) CreateSubtask(ctx context.Context, parentID uint, title, des
 				return err
 			}
 		}
+		// Inline links share the create transaction; no taskExistsActive check is
+		// needed here because the task was just created in this tx (whereas AddLink
+		// must guard against archived/deleted parents).
+		for _, in := range links {
+			l := model.Link{TaskID: task.ID, Type: in.Type, URL: in.URL, Description: in.Description}
+			if err := tx.Create(&l).Error; err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Reload with tags
-	if err := db.Preload("Tags").First(&task, task.ID).Error; err != nil {
+	// Reload with Tags and Links preloaded so the returned task is complete
+	// without forcing callers to round-trip through GetTask.
+	if err := db.Preload("Tags").Preload("Links").First(&task, task.ID).Error; err != nil {
 		return nil, fmt.Errorf("reload task %d: %w", task.ID, err)
 	}
 

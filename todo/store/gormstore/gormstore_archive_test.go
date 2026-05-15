@@ -10,7 +10,7 @@ import (
 
 func TestArchive_Basic(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
 	if err := s.ArchiveTask(ctx(), task.ID, true); err != nil {
 		t.Fatalf("archive: %v", err)
@@ -36,8 +36,8 @@ func TestArchive_Basic(t *testing.T) {
 
 func TestArchive_CascadesToSubtree(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child"})
 	s.SetParent(ctx(), child.ID, &parent.ID)
 
 	if err := s.ArchiveTask(ctx(), parent.ID, true); err != nil {
@@ -52,8 +52,8 @@ func TestArchive_CascadesToSubtree(t *testing.T) {
 
 func TestArchive_FailsIfBlockingExternal(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID}) // A blocks B
 
 	err := s.ArchiveTask(ctx(), a.ID, true)
@@ -68,8 +68,8 @@ func TestArchive_FailsIfBlockingExternal(t *testing.T) {
 
 func TestUnarchive_CascadesToSubtree(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child"})
 	s.SetParent(ctx(), child.ID, &parent.ID)
 	s.ArchiveTask(ctx(), parent.ID, true)
 
@@ -86,8 +86,8 @@ func TestUnarchive_CascadesToSubtree(t *testing.T) {
 
 func TestUnarchive_CleansUpInvalidBlockers(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 	s.AddBlockers(ctx(), a.ID, []uint{b.ID}) // B blocks A
 
 	// Archive A (no external blocking since A doesn't block anything)

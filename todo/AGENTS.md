@@ -78,6 +78,8 @@ Add to your MCP settings:
 
 **Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
 
+`create_task` and `create_subtask` accept an optional `links` array. Each item is `{type, url, description}` (description optional). Inline links are inserted in the same transaction as the task, so any link-validation failure rolls the whole call back. Only one `task.created` event fires regardless of link count — the vector syncer re-embeds the task once with link descriptions included. Prefer inline `links` over per-link `add_link` calls when creating a task that already has its references in hand: it is atomic and avoids the per-link re-embed churn.
+
 **Notes:** `add_note`, `update_note`, `list_notes`, `list_all_notes`, `search_notes`, `delete_note`
 
 **Links:** `add_link` (with optional `description`), `list_links`, `update_link`, `delete_link`

@@ -11,15 +11,36 @@ import (
 )
 
 func registerTaskTools(srv *server.MCPServer, s store.Store) {
+	// linksSchema is the JSON-Schema fragment for an array of {type, url, description}
+	// objects. This is the first object-shaped items schema in this codebase; future
+	// tools that accept structured arrays should follow the same mcpgo.Items pattern.
+	linksSchema := map[string]any{
+		"type":     "object",
+		"required": []string{"type", "url"},
+		"properties": map[string]any{
+			"type":        map[string]any{"type": "string", "enum": []string{"jira", "pr", "url"}},
+			"url":         map[string]any{"type": "string", "maxLength": 2000},
+			"description": map[string]any{"type": "string", "maxLength": 1000},
+		},
+	}
+
 	// create_task
 	srv.AddTool(mcpgo.NewTool("create_task",
-		mcpgo.WithDescription("Create a new task. Returns the created task with tags. " +
+		mcpgo.WithDescription("Create a new task. Returns the created task with tags and links. "+
+			"Optionally attach links inline via `links` — atomic with task creation "+
+			"(any link validation failure rolls the whole call back) and avoids the "+
+			"re-embed churn of separate add_link calls. "+
 			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithString("title", mcpgo.Required(), mcpgo.Description("Task title (max 512 chars)"), mcpgo.MaxLength(512)),
 		mcpgo.WithString("description", mcpgo.Description("Task description (max 100000 chars)"), mcpgo.MaxLength(100000)),
 		mcpgo.WithNumber("priority", mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
 		mcpgo.WithString("due_at", mcpgo.Description("Due date (YYYY-MM-DD)")),
 		mcpgo.WithArray("tags", mcpgo.Description("Tags (alphanumeric/hyphens/underscores only, max 100 chars each)"), mcpgo.WithStringItems(mcpgo.MaxLength(100)), mcpgo.MaxItems(50)),
+		mcpgo.WithArray("links",
+			mcpgo.Description("Optional links to attach atomically with task creation. Each item is {type, url, description}."),
+			mcpgo.MaxItems(50),
+			mcpgo.Items(linksSchema),
+		),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		title, err := requireStr(req, "title")
 		if err != nil {
@@ -29,14 +50,18 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if err != nil {
 			return errResult(err), nil
 		}
-		task, err := s.CreateTask(
-			ctx,
-			title,
-			getStr(req, "description"),
-			getInt(req, "priority"),
-			dueAt,
-			getStrSlice(req, "tags"),
-		)
+		links, err := getLinkInputs(req, "links")
+		if err != nil {
+			return errResult(err), nil
+		}
+		task, err := s.CreateTask(ctx, store.CreateTaskOptions{
+			Title:       title,
+			Description: getStr(req, "description"),
+			Priority:    getInt(req, "priority"),
+			DueAt:       dueAt,
+			Tags:        getStrSlice(req, "tags"),
+			Links:       links,
+		})
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -45,8 +70,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// create_subtask
 	srv.AddTool(mcpgo.NewTool("create_subtask",
-		mcpgo.WithDescription("Create a subtask under an existing non-archived parent. " +
-			"Returns full task detail including parent info. " +
+		mcpgo.WithDescription("Create a subtask under an existing non-archived parent. "+
+			"Returns full task detail (parent, children, links, etc.). "+
+			"Optionally attach links inline via `links` — atomic with task creation. "+
 			"Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("parent_id", mcpgo.Required(), mcpgo.Description("Parent task ID"), mcpgo.Min(1)),
 		mcpgo.WithString("title", mcpgo.Required(), mcpgo.Description("Task title (max 512 chars)"), mcpgo.MaxLength(512)),
@@ -54,6 +80,11 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		mcpgo.WithNumber("priority", mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
 		mcpgo.WithString("due_at", mcpgo.Description("Due date (YYYY-MM-DD)")),
 		mcpgo.WithArray("tags", mcpgo.Description("Tags (alphanumeric/hyphens/underscores only, max 100 chars each)"), mcpgo.WithStringItems(mcpgo.MaxLength(100)), mcpgo.MaxItems(50)),
+		mcpgo.WithArray("links",
+			mcpgo.Description("Optional links to attach atomically with task creation. Each item is {type, url, description}."),
+			mcpgo.MaxItems(50),
+			mcpgo.Items(linksSchema),
+		),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		parentID, err := requireUint(req, "parent_id")
 		if err != nil {
@@ -67,15 +98,19 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if err != nil {
 			return errResult(err), nil
 		}
-		task, err := s.CreateSubtask(
-			ctx,
-			parentID,
-			title,
-			getStr(req, "description"),
-			getInt(req, "priority"),
-			dueAt,
-			getStrSlice(req, "tags"),
-		)
+		links, err := getLinkInputs(req, "links")
+		if err != nil {
+			return errResult(err), nil
+		}
+		task, err := s.CreateTask(ctx, store.CreateTaskOptions{
+			Title:       title,
+			Description: getStr(req, "description"),
+			Priority:    getInt(req, "priority"),
+			DueAt:       dueAt,
+			Tags:        getStrSlice(req, "tags"),
+			Links:       links,
+			ParentID:    &parentID,
+		})
 		if err != nil {
 			return errResult(err), nil
 		}

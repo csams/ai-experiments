@@ -11,8 +11,7 @@ import (
 // All mutating operations must be wrapped in transactions.
 type Store interface {
 	// Tasks
-	CreateTask(ctx context.Context, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
-	CreateSubtask(ctx context.Context, parentID uint, title, description string, priority int, dueAt *time.Time, tags []string) (*model.Task, error)
+	CreateTask(ctx context.Context, opts CreateTaskOptions) (*model.Task, error)
 	GetTask(ctx context.Context, id uint, opts GetTaskOptions) (*model.TaskDetail, error)
 	// GetTasks fetches multiple tasks by ID (max 100). Returns results in the
 	// caller's input order with duplicate IDs collapsed to first occurrence.
@@ -79,6 +78,22 @@ type GetTaskOptions struct {
 type BatchGetTasksResult struct {
 	Tasks    []model.TaskDetail `json:"tasks"`     // input order, de-duplicated
 	NotFound []uint             `json:"not_found"` // valid IDs that had no matching task
+}
+
+// CreateTaskOptions holds the fields for CreateTask. ParentID, if non-nil,
+// creates the task as a subtask of that parent (which must exist and not be
+// archived). Links, if non-empty, attaches each link inside the same
+// transaction so creation is atomic — any validation failure rolls the task
+// (and tags) back. Only one task.created event is emitted regardless of
+// inline link count.
+type CreateTaskOptions struct {
+	Title       string
+	Description string
+	Priority    int
+	DueAt       *time.Time
+	Tags        []string
+	Links       []model.LinkInput
+	ParentID    *uint // nil = top-level; non-nil = subtask under this parent
 }
 
 // UpdateTaskOptions holds optional fields for updating a task.

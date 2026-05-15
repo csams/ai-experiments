@@ -54,7 +54,7 @@ type Task struct {
 	Children   []Task      `gorm:"foreignKey:ParentID" json:"children,omitempty"`
 	Blockers   []Task      `gorm:"many2many:task_blockers;joinForeignKey:TaskID;joinReferences:BlockerID" json:"blockers,omitempty"`
 	Tags       []TaskTag   `gorm:"foreignKey:TaskID" json:"tags,omitempty"`
-	Links      []Link      `gorm:"constraint:OnDelete:CASCADE" json:"links,omitempty"`
+	Links      []Link      `gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE" json:"links,omitempty"`
 	Notes      []Note      `gorm:"foreignKey:TaskID;constraint:OnDelete:SET NULL" json:"notes,omitempty"`
 	Checkpoint *Checkpoint `gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE" json:"checkpoint,omitempty"`
 
@@ -94,6 +94,15 @@ type Link struct {
 	URL         string    `gorm:"not null;size:2000" json:"url"`
 	Description string    `gorm:"size:1000" json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// LinkInput is the user-supplied payload for creating a link, distinct from
+// Link (which carries ID, TaskID, and CreatedAt that are meaningless on input).
+// Used by CreateTaskOptions.Links and any future create-style flows.
+type LinkInput struct {
+	Type        LinkType `json:"type"`
+	URL         string   `json:"url"`
+	Description string   `json:"description,omitempty"`
 }
 
 // Checkpoint is a singleton "resume here" bookmark per task. At most one per task.

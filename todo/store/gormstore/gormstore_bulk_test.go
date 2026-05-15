@@ -13,8 +13,8 @@ import (
 
 func TestBulkUpdateState_Done(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "Task A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "Task B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task B"})
 
 	results, err := s.BulkUpdateState(ctx(), []uint{a.ID, b.ID}, model.StateDone)
 	if err != nil {
@@ -32,8 +32,8 @@ func TestBulkUpdateState_Done(t *testing.T) {
 
 func TestBulkUpdateState_DoneCascadeUnblocks(t *testing.T) {
 	s := newTestStore(t)
-	blocker, _ := s.CreateTask(ctx(), "Blocker", "", 0, nil, nil)
-	blocked, _ := s.CreateTask(ctx(), "Blocked", "", 0, nil, nil)
+	blocker, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Blocker"})
+	blocked, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Blocked"})
 	s.AddBlockers(ctx(), blocked.ID, []uint{blocker.ID})
 
 	// Complete the blocker via bulk
@@ -50,7 +50,7 @@ func TestBulkUpdateState_DoneCascadeUnblocks(t *testing.T) {
 
 func TestBulkUpdateState_RejectsBlocked(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
 	_, err := s.BulkUpdateState(ctx(), []uint{1}, model.StateBlocked)
 	if !errors.Is(err, model.ErrInvalidState) {
@@ -60,7 +60,7 @@ func TestBulkUpdateState_RejectsBlocked(t *testing.T) {
 
 func TestBulkUpdateState_RejectsArchived(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	s.ArchiveTask(ctx(), task.ID, true)
 
 	_, err := s.BulkUpdateState(ctx(), []uint{task.ID}, model.StateDone)
@@ -99,8 +99,8 @@ func TestBulkUpdateState_RejectsExceedsLimit(t *testing.T) {
 
 func TestBulkUpdatePriority_Basic(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "Task A", "", 5, nil, nil)
-	b, _ := s.CreateTask(ctx(), "Task B", "", 5, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task A", Priority: 5})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task B", Priority: 5})
 
 	results, err := s.BulkUpdatePriority(ctx(), []uint{a.ID, b.ID}, 1)
 	if err != nil {
@@ -115,8 +115,8 @@ func TestBulkUpdatePriority_Basic(t *testing.T) {
 
 func TestBulkUpdatePriority_ClampsByBlockedTask(t *testing.T) {
 	s := newTestStore(t)
-	blocker, _ := s.CreateTask(ctx(), "Blocker", "", 0, nil, nil)
-	blocked, _ := s.CreateTask(ctx(), "Blocked", "", 1, nil, nil)
+	blocker, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Blocker"})
+	blocked, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Blocked", Priority: 1})
 	s.AddBlockers(ctx(), blocked.ID, []uint{blocker.ID})
 
 	// Try to set blocker priority worse than blocked task
@@ -132,8 +132,8 @@ func TestBulkUpdatePriority_ClampsByBlockedTask(t *testing.T) {
 
 func TestBulkUpdatePriority_PropagatesUp(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 5, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 5, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A", Priority: 5})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B", Priority: 5})
 
 	// B is blocked by A → AddBlockers(B, [A])
 	if _, err := s.AddBlockers(ctx(), b.ID, []uint{a.ID}); err != nil {
@@ -156,8 +156,8 @@ func TestBulkUpdatePriority_PropagatesUp(t *testing.T) {
 
 func TestBulkAddTags_Basic(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "Task A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "Task B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task B"})
 
 	err := s.BulkAddTags(ctx(), []uint{a.ID, b.ID}, []string{"urgent", "backend"})
 	if err != nil {
@@ -176,7 +176,7 @@ func TestBulkAddTags_Basic(t *testing.T) {
 
 func TestBulkAddTags_Idempotent(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateTask(ctx(), "Task", "", 0, nil, []string{"existing"})
+	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Tags: []string{"existing"}})
 
 	// Adding the same tag again should not error or duplicate
 	err := s.BulkAddTags(ctx(), []uint{1}, []string{"existing"})
@@ -197,7 +197,7 @@ func TestBulkAddTags_ExceedsTagLimit(t *testing.T) {
 	for i := range tags {
 		tags[i] = fmt.Sprintf("tag%d", i)
 	}
-	s.CreateTask(ctx(), "Task", "", 0, nil, tags)
+	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Tags: tags})
 
 	// Adding 2 more should exceed the 50-tag limit
 	err := s.BulkAddTags(ctx(), []uint{1}, []string{"extra1", "extra2"})
@@ -212,7 +212,7 @@ func TestBulkAddTags_ExceedsTagLimit(t *testing.T) {
 
 func TestBulkAddTags_InvalidTag(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
 	err := s.BulkAddTags(ctx(), []uint{1}, []string{"invalid tag!"})
 	if err == nil {
@@ -224,8 +224,8 @@ func TestBulkAddTags_InvalidTag(t *testing.T) {
 
 func TestBulkRemoveTags_Basic(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateTask(ctx(), "Task A", "", 0, nil, []string{"remove-me", "keep"})
-	s.CreateTask(ctx(), "Task B", "", 0, nil, []string{"remove-me", "keep"})
+	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task A", Tags: []string{"remove-me", "keep"}})
+	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task B", Tags: []string{"remove-me", "keep"}})
 
 	err := s.BulkRemoveTags(ctx(), []uint{1, 2}, []string{"remove-me"})
 	if err != nil {
@@ -246,7 +246,7 @@ func TestBulkRemoveTags_Basic(t *testing.T) {
 
 func TestBulkRemoveTags_NonexistentTagSucceeds(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
 	err := s.BulkRemoveTags(ctx(), []uint{1}, []string{"nonexistent"})
 	if err != nil {

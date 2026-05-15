@@ -12,7 +12,7 @@ import (
 
 func TestCheckpoint_SetAndGet(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 
 	cp, err := s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{
 		Recap:       "explored model layer",
@@ -43,7 +43,7 @@ func TestCheckpoint_SetAndGet(t *testing.T) {
 
 func TestCheckpoint_GetNotFound(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 
 	_, err := s.GetCheckpoint(ctx(), task.ID)
 	if !errors.Is(err, model.ErrNotFound) {
@@ -61,7 +61,7 @@ func TestCheckpoint_GetUnknownTask(t *testing.T) {
 
 func TestCheckpoint_SetIsUpsert(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 
 	first, err := s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{
 		Recap: "r1", NextSteps: "n1",
@@ -103,7 +103,7 @@ func TestCheckpoint_SetIsUpsert(t *testing.T) {
 
 func TestCheckpoint_Delete(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	_, _ = s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{Recap: "r", NextSteps: "n"})
 
 	if err := s.DeleteCheckpoint(ctx(), task.ID); err != nil {
@@ -120,7 +120,7 @@ func TestCheckpoint_Delete(t *testing.T) {
 
 func TestCheckpoint_CascadeOnTaskDelete(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	_, _ = s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{Recap: "r", NextSteps: "n"})
 
 	if err := s.DeleteTask(ctx(), task.ID, store.DeleteTaskOptions{}); err != nil {
@@ -135,7 +135,7 @@ func TestCheckpoint_CascadeOnTaskDelete(t *testing.T) {
 
 func TestCheckpoint_RejectsEmptyRecapOrNext(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 
 	if _, err := s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{Recap: "", NextSteps: "n"}); err == nil {
 		t.Errorf("expected validation error for empty recap")
@@ -147,7 +147,7 @@ func TestCheckpoint_RejectsEmptyRecapOrNext(t *testing.T) {
 
 func TestCheckpoint_RejectsOversizedField(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 
 	big := strings.Repeat("a", 10001)
 	if _, err := s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{Recap: big, NextSteps: "n"}); err == nil {
@@ -163,7 +163,7 @@ func TestCheckpoint_RejectsOversizedField(t *testing.T) {
 
 func TestCheckpoint_SetRejectsArchivedTask(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	if err := s.ArchiveTask(ctx(), task.ID, true); err != nil {
 		t.Fatalf("archive: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestCheckpoint_SetRejectsArchivedTask(t *testing.T) {
 
 func TestCheckpoint_GetAndDeleteAllowArchivedTask(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	if _, err := s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{Recap: "r", NextSteps: "n"}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestCheckpoint_GetAndDeleteAllowArchivedTask(t *testing.T) {
 
 func TestCheckpoint_GetTaskIncludesCheckpoint(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	if _, err := s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{
 		Recap: "r", NextSteps: "n", OpenThreads: "o",
 	}); err != nil {
@@ -212,8 +212,8 @@ func TestCheckpoint_GetTaskIncludesCheckpoint(t *testing.T) {
 
 func TestCheckpoint_ListTasksHasCheckpointFlag(t *testing.T) {
 	s := newTestStore(t)
-	t1, _ := s.CreateTask(ctx(), "T1", "", 0, nil, nil)
-	t2, _ := s.CreateTask(ctx(), "T2", "", 0, nil, nil)
+	t1, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T1"})
+	t2, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T2"})
 	if _, err := s.SetCheckpoint(ctx(), t1.ID, store.SetCheckpointOptions{Recap: "r", NextSteps: "n"}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestCheckpoint_ListTasksHasCheckpointFlag(t *testing.T) {
 
 func TestCheckpoint_EmitsCreatedThenUpdatedEvents(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 
 	obs := &recordingObserver{}
 	s.AddObserver(obs)
@@ -281,9 +281,9 @@ func TestCheckpoint_EmitsCreatedThenUpdatedEvents(t *testing.T) {
 
 func TestCheckpoint_CascadeOnRecursiveSubtreeDelete(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "P", "", 0, nil, nil)
-	child1, _ := s.CreateSubtask(ctx(), parent.ID, "C1", "", 0, nil, nil)
-	child2, _ := s.CreateSubtask(ctx(), parent.ID, "C2", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "P"})
+	child1, _ := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &parent.ID, Title: "C1"})
+	child2, _ := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &parent.ID, Title: "C2"})
 	for _, id := range []uint{parent.ID, child1.ID, child2.ID} {
 		if _, err := s.SetCheckpoint(ctx(), id, store.SetCheckpointOptions{Recap: "r", NextSteps: "n"}); err != nil {
 			t.Fatalf("set on %d: %v", id, err)
@@ -305,7 +305,7 @@ func TestCheckpoint_CascadeOnRecursiveSubtreeDelete(t *testing.T) {
 
 func TestCheckpoint_NoOpUpdateSkipsEvent(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	first, err := s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{
 		Recap: "r", NextSteps: "n", OpenThreads: "o",
 	})
@@ -333,7 +333,7 @@ func TestCheckpoint_NoOpUpdateSkipsEvent(t *testing.T) {
 
 func TestCheckpoint_EmitsDeletedEvent(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	_, _ = s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{Recap: "r", NextSteps: "n"})
 
 	obs := &recordingObserver{}

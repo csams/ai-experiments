@@ -32,6 +32,11 @@ go build -o todo .
 ./todo task create "Update documentation" --priority 3
 ./todo task create "Refactor auth module" --priority 2 -d "Extract auth into separate package"
 
+# Attach links at creation time (atomic with the task; repeatable)
+./todo task create "Investigate timeout" --priority 1 \
+  --link 'type=pr,url=https://github.com/foo/bar/pull/42,desc=initial PR' \
+  --link 'type=jira,url=https://example.atlassian.net/browse/PROJ-7'
+
 # List tasks (top-level, sorted by priority)
 ./todo task list
 

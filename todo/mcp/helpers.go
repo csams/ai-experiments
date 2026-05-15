@@ -174,6 +174,50 @@ func getOptUint(req mcpgo.CallToolRequest, key string) *uint {
 	return nil
 }
 
+// getLinkInputs extracts an array of {type, url, description} objects from the
+// named array argument. Each entry must be a JSON object with string `type`,
+// string `url`, and optional string `description`. Returns nil if the argument
+// is missing or empty. Field-level validation (enum check, length limits) is
+// deferred to the store; this helper just shapes the input and distinguishes
+// missing-vs-wrong-type so callers get a clear error.
+func getLinkInputs(req mcpgo.CallToolRequest, key string) ([]model.LinkInput, error) {
+	args := req.GetArguments()
+	arr, ok := args[key].([]any)
+	if !ok || len(arr) == 0 {
+		return nil, nil
+	}
+	out := make([]model.LinkInput, 0, len(arr))
+	for i, v := range arr {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d] must be an object", key, i)
+		}
+		tRaw, hasT := m["type"]
+		t, tIsStr := tRaw.(string)
+		if hasT && !tIsStr {
+			return nil, fmt.Errorf("%s[%d].type must be a string", key, i)
+		}
+		if t == "" {
+			return nil, fmt.Errorf("%s[%d].type is required", key, i)
+		}
+		uRaw, hasU := m["url"]
+		u, uIsStr := uRaw.(string)
+		if hasU && !uIsStr {
+			return nil, fmt.Errorf("%s[%d].url must be a string", key, i)
+		}
+		if u == "" {
+			return nil, fmt.Errorf("%s[%d].url is required", key, i)
+		}
+		dRaw, hasD := m["description"]
+		d, dIsStr := dRaw.(string)
+		if hasD && !dIsStr {
+			return nil, fmt.Errorf("%s[%d].description must be a string", key, i)
+		}
+		out = append(out, model.LinkInput{Type: model.LinkType(t), URL: u, Description: d})
+	}
+	return out, nil
+}
+
 // getOptStr extracts a *string argument, returns nil if missing.
 // An explicit empty string returns &"" — used to clear optional fields.
 func getOptStr(req mcpgo.CallToolRequest, key string) *string {

@@ -279,7 +279,7 @@ func uintPtr(v uint) *uint { return &v }
 func TestSync_CreateTaskEmbedsDocument(t *testing.T) {
 	s, emb, vs, _ := newTestSetup(t)
 
-	_, err := s.CreateTask(bg(), "Fix auth bug", "Token expiry issue", 1, nil, []string{"backend"})
+	_, err := s.CreateTask(bg(), store.CreateTaskOptions{Title: "Fix auth bug", Description: "Token expiry issue", Priority: 1, Tags: []string{"backend"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestSync_CreateTaskEmbedsDocument(t *testing.T) {
 func TestSync_AddNoteEmbedsDocument(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
-	s.CreateTask(bg(), "Task", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task"})
 	_, err := s.AddNote(bg(), uintPtr(1), "investigation notes here")
 	if err != nil {
 		t.Fatal(err)
@@ -354,8 +354,8 @@ func TestSync_StandaloneNoteEmbedsWithoutTaskID(t *testing.T) {
 func TestSync_NoteReparentReembedsMetadata(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
-	t1, _ := s.CreateTask(bg(), "T1", "", 0, nil, nil)
-	t2, _ := s.CreateTask(bg(), "T2", "", 0, nil, nil)
+	t1, _ := s.CreateTask(bg(), store.CreateTaskOptions{Title: "T1"})
+	t2, _ := s.CreateTask(bg(), store.CreateTaskOptions{Title: "T2"})
 	note, _ := s.AddNote(bg(), &t1.ID, "n")
 
 	if _, err := s.UpdateNote(bg(), note.ID, store.UpdateNoteOptions{
@@ -380,7 +380,7 @@ func TestSync_NoteReparentReembedsMetadata(t *testing.T) {
 func TestSync_DeleteTaskRemovesFromVectorStore(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
-	s.CreateTask(bg(), "Task to delete", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task to delete"})
 
 	vs.mu.Lock()
 	hasBefore := len(vs.findTaskChunks(1)) > 0
@@ -399,10 +399,51 @@ func TestSync_DeleteTaskRemovesFromVectorStore(t *testing.T) {
 	}
 }
 
+// TestSync_InlineLinksEmbedInOneCall pins the contract documented in AGENTS.md:
+// creating a task with inline links emits a single task.created event, the
+// vector syncer fetches the task with links preloaded, and the resulting
+// embedding text contains every link description — all from one embed call,
+// not one-per-link as separate AddLink would produce.
+func TestSync_InlineLinksEmbedInOneCall(t *testing.T) {
+	s, emb, vs, _ := newTestSetup(t)
+
+	_, err := s.CreateTask(bg(), store.CreateTaskOptions{
+		Title: "Investigate timeout",
+		Links: []model.LinkInput{
+			{Type: model.LinkPR, URL: "https://github.com/foo/bar/pull/42", Description: "candidate fix in PR"},
+			{Type: model.LinkJira, URL: "https://example.atlassian.net/browse/PROJ-7", Description: "filed by oncall"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	emb.mu.Lock()
+	calls := len(emb.calls)
+	emb.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("embed calls = %d, want 1 (inline links should not trigger per-link re-embed)", calls)
+	}
+
+	vs.mu.Lock()
+	chunks := vs.findTaskChunks(1)
+	vs.mu.Unlock()
+	if len(chunks) == 0 {
+		t.Fatal("expected task 1 chunks in vector store")
+	}
+	text := chunks[0].Text
+	if !strings.Contains(text, "candidate fix in PR") {
+		t.Errorf("first link description missing from embedding text: %q", text)
+	}
+	if !strings.Contains(text, "filed by oncall") {
+		t.Errorf("second link description missing from embedding text: %q", text)
+	}
+}
+
 func TestSync_AddLinkRefreshesTaskEmbedding(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
-	s.CreateTask(bg(), "Auth bug", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Auth bug"})
 	if _, err := s.AddLink(bg(), 1, model.LinkJira, "AUTH-456", "original ticket describing the regression"); err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +462,7 @@ func TestSync_AddLinkRefreshesTaskEmbedding(t *testing.T) {
 func TestSync_UpdateLinkDescriptionRefreshesTaskEmbedding(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
-	s.CreateTask(bg(), "Task", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task"})
 	link, _ := s.AddLink(bg(), 1, model.LinkURL, "https://x.example.com", "first description")
 
 	newDesc := "second description after edit"
@@ -447,7 +488,7 @@ func TestSync_UpdateLinkDescriptionRefreshesTaskEmbedding(t *testing.T) {
 func TestSync_ClearLinkDescriptionRefreshesTaskEmbedding(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
-	s.CreateTask(bg(), "Task", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task"})
 	link, _ := s.AddLink(bg(), 1, model.LinkURL, "https://x.example.com", "secret content to remove")
 
 	empty := ""
@@ -469,7 +510,7 @@ func TestSync_ClearLinkDescriptionRefreshesTaskEmbedding(t *testing.T) {
 func TestSync_DeleteLinkRefreshesTaskEmbedding(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
-	s.CreateTask(bg(), "Task", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task"})
 	link, _ := s.AddLink(bg(), 1, model.LinkURL, "https://x.example.com", "to be removed")
 
 	if err := s.DeleteLink(bg(), 1, link.ID); err != nil {
@@ -490,7 +531,7 @@ func TestSync_DeleteLinkRefreshesTaskEmbedding(t *testing.T) {
 func TestReindex_IncludesLinkDescriptions(t *testing.T) {
 	s, _, vs, syncer := newTestSetup(t)
 
-	s.CreateTask(bg(), "Reindex me", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Reindex me"})
 	s.AddLink(bg(), 1, model.LinkJira, "PROJ-1", "searchable link content")
 
 	vs.mu.Lock()
@@ -515,8 +556,8 @@ func TestReindex_IncludesLinkDescriptions(t *testing.T) {
 func TestSemanticSearch_Basic(t *testing.T) {
 	s, _, _, syncer := newTestSetup(t)
 
-	s.CreateTask(bg(), "Fix authentication bug", "Login token expiry", 1, nil, []string{"auth"})
-	s.CreateTask(bg(), "Update documentation", "README changes", 3, nil, []string{"docs"})
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Fix authentication bug", Description: "Login token expiry", Priority: 1, Tags: []string{"auth"}})
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Update documentation", Description: "README changes", Priority: 3, Tags: []string{"docs"}})
 	s.AddNote(bg(), uintPtr(1), "Auth tokens expire after 5 minutes")
 
 	results, err := syncer.SemanticSearch(bg(), "authentication token", store.SemanticSearchOptions{
@@ -539,7 +580,7 @@ func TestSemanticSearch_Basic(t *testing.T) {
 func TestSemanticSearch_TypeFilter(t *testing.T) {
 	s, _, _, syncer := newTestSetup(t)
 
-	s.CreateTask(bg(), "Task A", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task A"})
 	s.AddNote(bg(), uintPtr(1), "Note for task A")
 
 	results, err := syncer.SemanticSearch(bg(), "task", store.SemanticSearchOptions{
@@ -559,9 +600,9 @@ func TestSemanticSearch_TypeFilter(t *testing.T) {
 func TestSemanticSearchContext(t *testing.T) {
 	s, _, _, syncer := newTestSetup(t)
 
-	s.CreateTask(bg(), "Auth module", "Handle login flow", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Auth module", Description: "Handle login flow"})
 	s.AddNote(bg(), uintPtr(1), "Uses JWT tokens")
-	s.CreateTask(bg(), "Token refresh", "Implement refresh tokens", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Token refresh", Description: "Implement refresh tokens"})
 
 	results, err := syncer.SemanticSearchContext(bg(), 1, store.SemanticSearchOptions{
 		Limit: 5,
@@ -581,8 +622,8 @@ func TestSemanticSearchContext(t *testing.T) {
 func TestReindex(t *testing.T) {
 	s, _, vs, syncer := newTestSetup(t)
 
-	s.CreateTask(bg(), "Task 1", "", 0, nil, nil)
-	s.CreateTask(bg(), "Task 2", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task 1"})
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task 2"})
 	s.AddNote(bg(), uintPtr(1), "Note 1")
 
 	// Clear vector store manually
@@ -615,7 +656,7 @@ func TestReindex(t *testing.T) {
 func TestReindex_WithClear(t *testing.T) {
 	s, _, vs, syncer := newTestSetup(t)
 
-	s.CreateTask(bg(), "Task 1", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task 1"})
 	s.AddNote(bg(), uintPtr(1), "Note 1")
 
 	// Reindex with clear=true should reset and repopulate
@@ -637,9 +678,9 @@ func TestReindex_WithClear(t *testing.T) {
 func TestSemanticSearch_ExcludesArchived(t *testing.T) {
 	s, _, _, syncer := newTestSetup(t)
 
-	s.CreateTask(bg(), "Active task", "This is active", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Active task", Description: "This is active"})
 	s.AddNote(bg(), uintPtr(1), "Note on active task")
-	s.CreateTask(bg(), "Archived task", "This will be archived", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Archived task", Description: "This will be archived"})
 	s.AddNote(bg(), uintPtr(2), "Note on archived task")
 	s.ArchiveTask(bg(), 2, true)
 
@@ -667,8 +708,8 @@ func TestSemanticSearch_ExcludesArchived(t *testing.T) {
 func TestSemanticSearch_IncludeArchived(t *testing.T) {
 	s, _, _, syncer := newTestSetup(t)
 
-	s.CreateTask(bg(), "Active task", "This is active", 0, nil, nil)
-	s.CreateTask(bg(), "Archived task", "This will be archived", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Active task", Description: "This is active"})
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Archived task", Description: "This will be archived"})
 	s.AddNote(bg(), uintPtr(2), "Note on archived task")
 	s.ArchiveTask(bg(), 2, true)
 
@@ -697,7 +738,7 @@ func TestSemanticSearch_IncludeArchived(t *testing.T) {
 func TestArchiveEvent_UpdatesNoteMetadata(t *testing.T) {
 	s, _, vs, _ := newTestSetup(t)
 
-	s.CreateTask(bg(), "Task with notes", "", 0, nil, nil)
+	s.CreateTask(bg(), store.CreateTaskOptions{Title: "Task with notes"})
 	s.AddNote(bg(), uintPtr(1), "Important note")
 
 	// Before archive, note should have archived=false

@@ -21,12 +21,12 @@ type busyFixture struct {
 func makeBusyTask(t *testing.T) busyFixture {
 	t.Helper()
 	s := newTestStore(t)
-	task, err := s.CreateTask(ctx(), "Task", "A description.", 5, nil, []string{"tag1"})
+	task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Description: "A description.", Priority: 5, Tags: []string{"tag1"}})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 
-	blocker, err := s.CreateTask(ctx(), "Blocker", "", 5, nil, nil)
+	blocker, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Blocker", Priority: 5})
 	if err != nil {
 		t.Fatalf("create blocker: %v", err)
 	}
@@ -35,7 +35,7 @@ func makeBusyTask(t *testing.T) busyFixture {
 	}
 
 	// `blocked` is blocked by `task`, so `task.Blocking` should contain `blocked`.
-	blocked, err := s.CreateTask(ctx(), "Blocked", "", 5, nil, nil)
+	blocked, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Blocked", Priority: 5})
 	if err != nil {
 		t.Fatalf("create blocked: %v", err)
 	}
@@ -49,7 +49,7 @@ func makeBusyTask(t *testing.T) busyFixture {
 	if _, err := s.AddLink(ctx(), task.ID, model.LinkJira, "PROJ-1", "ticket"); err != nil {
 		t.Fatalf("add link: %v", err)
 	}
-	child, err := s.CreateSubtask(ctx(), task.ID, "Child", "", 5, nil, nil)
+	child, err := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &task.ID, Title: "Child", Priority: 5})
 	if err != nil {
 		t.Fatalf("create child: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestListTasks_IncludeDescription(t *testing.T) {
 
 func TestUpdateTask_DescriptionRoundtrip(t *testing.T) {
 	s := newTestStore(t)
-	task, err := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -268,7 +268,7 @@ func makeThreeTasks(t *testing.T) (*gormstore.GormStore, []uint) {
 	ids := make([]uint, 3)
 	titles := []string{"Alpha", "Bravo", "Charlie"}
 	for i, title := range titles {
-		task, err := s.CreateTask(ctx(), title, "", 5, nil, nil)
+		task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: title, Priority: 5})
 		if err != nil {
 			t.Fatalf("create %s: %v", title, err)
 		}
@@ -359,7 +359,7 @@ func TestGetTasks_MissingIDsReportedInNotFound(t *testing.T) {
 func TestGetTasks_IncludesApplyToEveryTask(t *testing.T) {
 	f := makeBusyTask(t)
 	// Second task with no notes/links to confirm includes apply uniformly.
-	plain, err := f.s.CreateTask(ctx(), "Plain", "", 5, nil, nil)
+	plain, err := f.s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Plain", Priority: 5})
 	if err != nil {
 		t.Fatalf("create plain: %v", err)
 	}

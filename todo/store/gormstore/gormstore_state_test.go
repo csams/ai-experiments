@@ -10,7 +10,7 @@ import (
 
 func TestSetTaskState_Progressing(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
 	updated, err := s.SetTaskState(ctx(), task.ID, model.StateProgressing)
 	if err != nil {
@@ -23,7 +23,7 @@ func TestSetTaskState_Progressing(t *testing.T) {
 
 func TestSetTaskState_BlockedReturnsError(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
 	_, err := s.SetTaskState(ctx(), task.ID, model.StateBlocked)
 	if !errors.Is(err, model.ErrInvalidState) {
@@ -33,7 +33,7 @@ func TestSetTaskState_BlockedReturnsError(t *testing.T) {
 
 func TestSetTaskState_ArchivedReturnsError(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	s.ArchiveTask(ctx(), task.ID, true)
 
 	_, err := s.SetTaskState(ctx(), task.ID, model.StateProgressing)
@@ -44,8 +44,8 @@ func TestSetTaskState_ArchivedReturnsError(t *testing.T) {
 
 func TestSetTaskState_ClearsBlockerEntries(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 
 	// Manually set B to Progressing — should clear its blocker entries
@@ -62,8 +62,8 @@ func TestSetTaskState_ClearsBlockerEntries(t *testing.T) {
 
 func TestSetTaskState_DoneCascadeUnblocks(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 
 	// Complete A — should unblock B
@@ -83,8 +83,8 @@ func TestSetTaskState_DoneCascadeUnblocks(t *testing.T) {
 
 func TestAddBlockers_Basic(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 
 	result, err := s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 	if err != nil {
@@ -100,9 +100,9 @@ func TestAddBlockers_Basic(t *testing.T) {
 
 func TestAddBlockers_MultipleBlockers(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
-	c, _ := s.CreateTask(ctx(), "C", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C"})
 
 	s.AddBlockers(ctx(), c.ID, []uint{a.ID, b.ID})
 
@@ -125,7 +125,7 @@ func TestAddBlockers_MultipleBlockers(t *testing.T) {
 
 func TestAddBlockers_SelfBlock(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
 
 	_, err := s.AddBlockers(ctx(), a.ID, []uint{a.ID})
 	if err == nil {
@@ -135,8 +135,8 @@ func TestAddBlockers_SelfBlock(t *testing.T) {
 
 func TestAddBlockers_BlockByDone(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 	s.SetTaskState(ctx(), a.ID, model.StateDone)
 
 	_, err := s.AddBlockers(ctx(), b.ID, []uint{a.ID})
@@ -147,8 +147,8 @@ func TestAddBlockers_BlockByDone(t *testing.T) {
 
 func TestAddBlockers_BlockByArchived(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 	s.ArchiveTask(ctx(), a.ID, true)
 
 	_, err := s.AddBlockers(ctx(), b.ID, []uint{a.ID})
@@ -159,8 +159,8 @@ func TestAddBlockers_BlockByArchived(t *testing.T) {
 
 func TestAddBlockers_CycleDetection(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 
 	// A blocks B
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
@@ -178,8 +178,8 @@ func TestAddBlockers_CycleDetection(t *testing.T) {
 
 func TestAddBlockers_Idempotent(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 	// Adding again should not error
@@ -191,8 +191,8 @@ func TestAddBlockers_Idempotent(t *testing.T) {
 
 func TestRemoveBlockers_AutoUnblocks(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 
 	result, err := s.RemoveBlockers(ctx(), b.ID, []uint{a.ID})
@@ -206,7 +206,7 @@ func TestRemoveBlockers_AutoUnblocks(t *testing.T) {
 
 func TestRemoveBlockers_NonBlockedIsNoop(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
 
 	_, err := s.RemoveBlockers(ctx(), a.ID, []uint{999})
 	if err != nil {

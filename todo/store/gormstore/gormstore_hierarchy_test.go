@@ -10,9 +10,9 @@ import (
 
 func TestCreateSubtask(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
 
-	child, err := s.CreateSubtask(ctx(), parent.ID, "Child", "desc", 1, nil, []string{"tag1"})
+	child, err := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &parent.ID, Title: "Child", Description: "desc", Priority: 1, Tags: []string{"tag1"}})
 	if err != nil {
 		t.Fatalf("create subtask: %v", err)
 	}
@@ -41,7 +41,8 @@ func TestCreateSubtask(t *testing.T) {
 func TestCreateSubtask_NonexistentParent(t *testing.T) {
 	s := newTestStore(t)
 
-	_, err := s.CreateSubtask(ctx(), 9999, "Child", "", 0, nil, nil)
+	_pid := uint(9999)
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &_pid, Title: "Child"})
 	if !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -50,7 +51,8 @@ func TestCreateSubtask_NonexistentParent(t *testing.T) {
 func TestCreateSubtask_InvalidParentID(t *testing.T) {
 	s := newTestStore(t)
 
-	_, err := s.CreateSubtask(ctx(), 0, "Child", "", 0, nil, nil)
+	_pid := uint(0)
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &_pid, Title: "Child"})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("expected ValidationError, got %T: %v", err, err)
@@ -59,9 +61,9 @@ func TestCreateSubtask_InvalidParentID(t *testing.T) {
 
 func TestCreateSubtask_EmptyTitle(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
 
-	_, err := s.CreateSubtask(ctx(), parent.ID, "", "", 0, nil, nil)
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &parent.ID, Title: ""})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("expected ValidationError, got %T: %v", err, err)
@@ -70,10 +72,10 @@ func TestCreateSubtask_EmptyTitle(t *testing.T) {
 
 func TestCreateSubtask_ArchivedParent(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
 	s.ArchiveTask(ctx(), parent.ID, true)
 
-	_, err := s.CreateSubtask(ctx(), parent.ID, "Child", "", 0, nil, nil)
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &parent.ID, Title: "Child"})
 	if !errors.Is(err, model.ErrArchived) {
 		t.Errorf("expected ErrArchived, got %v", err)
 	}
@@ -81,9 +83,9 @@ func TestCreateSubtask_ArchivedParent(t *testing.T) {
 
 func TestCreateSubtask_InvalidTags(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
 
-	_, err := s.CreateSubtask(ctx(), parent.ID, "Child", "", 0, nil, []string{"invalid tag"})
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &parent.ID, Title: "Child", Tags: []string{"invalid tag"}})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("expected ValidationError, got %T: %v", err, err)
@@ -92,8 +94,8 @@ func TestCreateSubtask_InvalidTags(t *testing.T) {
 
 func TestSetParent_Basic(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child"})
 
 	if err := s.SetParent(ctx(), child.ID, &parent.ID); err != nil {
 		t.Fatalf("set parent: %v", err)
@@ -107,8 +109,8 @@ func TestSetParent_Basic(t *testing.T) {
 
 func TestSetParent_Unparent(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child"})
 	s.SetParent(ctx(), child.ID, &parent.ID)
 
 	if err := s.SetParent(ctx(), child.ID, nil); err != nil {
@@ -123,7 +125,7 @@ func TestSetParent_Unparent(t *testing.T) {
 
 func TestSetParent_SelfParent(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
 	err := s.SetParent(ctx(), task.ID, &task.ID)
 	if err == nil {
@@ -133,9 +135,9 @@ func TestSetParent_SelfParent(t *testing.T) {
 
 func TestSetParent_CycleDetection(t *testing.T) {
 	s := newTestStore(t)
-	a, _ := s.CreateTask(ctx(), "A", "", 0, nil, nil)
-	b, _ := s.CreateTask(ctx(), "B", "", 0, nil, nil)
-	c, _ := s.CreateTask(ctx(), "C", "", 0, nil, nil)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C"})
 
 	s.SetParent(ctx(), b.ID, &a.ID) // A -> B
 	s.SetParent(ctx(), c.ID, &b.ID) // B -> C
@@ -153,8 +155,8 @@ func TestSetParent_CycleDetection(t *testing.T) {
 
 func TestDeleteTask_PromotesSubtasks(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child"})
 	s.SetParent(ctx(), child.ID, &parent.ID)
 
 	if err := s.DeleteTask(ctx(), parent.ID, store.DeleteTaskOptions{}); err != nil {
@@ -169,9 +171,9 @@ func TestDeleteTask_PromotesSubtasks(t *testing.T) {
 
 func TestDeleteTask_Recursive(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
-	grandchild, _ := s.CreateTask(ctx(), "Grandchild", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child"})
+	grandchild, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Grandchild"})
 	s.SetParent(ctx(), child.ID, &parent.ID)
 	s.SetParent(ctx(), grandchild.ID, &child.ID)
 
@@ -189,9 +191,9 @@ func TestDeleteTask_Recursive(t *testing.T) {
 
 func TestDeleteTask_RecursiveBlocksExternal(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
-	external, _ := s.CreateTask(ctx(), "External", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child"})
+	external, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "External"})
 	s.SetParent(ctx(), child.ID, &parent.ID)
 	s.AddBlockers(ctx(), external.ID, []uint{child.ID}) // child blocks external
 
@@ -207,9 +209,9 @@ func TestDeleteTask_RecursiveBlocksExternal(t *testing.T) {
 
 func TestDeleteTask_RecursiveBlocksWithinSetOK(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
-	child1, _ := s.CreateTask(ctx(), "Child1", "", 0, nil, nil)
-	child2, _ := s.CreateTask(ctx(), "Child2", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
+	child1, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child1"})
+	child2, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child2"})
 	s.SetParent(ctx(), child1.ID, &parent.ID)
 	s.SetParent(ctx(), child2.ID, &parent.ID)
 	s.AddBlockers(ctx(), child2.ID, []uint{child1.ID}) // child1 blocks child2 (both in set)
@@ -222,10 +224,10 @@ func TestDeleteTask_RecursiveBlocksWithinSetOK(t *testing.T) {
 
 func TestListTasks_ParentFilter(t *testing.T) {
 	s := newTestStore(t)
-	root, _ := s.CreateTask(ctx(), "Root", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
-	grandchild, _ := s.CreateTask(ctx(), "Grandchild", "", 0, nil, nil)
-	s.CreateTask(ctx(), "Other", "", 0, nil, nil) // not in subtree
+	root, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Root"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child"})
+	grandchild, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Grandchild"})
+	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Other"}) // not in subtree
 
 	s.SetParent(ctx(), child.ID, &root.ID)
 	s.SetParent(ctx(), grandchild.ID, &child.ID)

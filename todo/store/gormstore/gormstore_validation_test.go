@@ -22,7 +22,7 @@ func TestValidation_IDZero(t *testing.T) {
 func TestValidation_TitleTooLong(t *testing.T) {
 	s := newTestStore(t)
 	longTitle := strings.Repeat("a", 513)
-	_, err := s.CreateTask(ctx(), longTitle, "", 0, nil, nil)
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: longTitle})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "title" {
 		t.Errorf("expected ValidationError on title, got %v", err)
@@ -32,7 +32,7 @@ func TestValidation_TitleTooLong(t *testing.T) {
 func TestValidation_LongDescriptionAllowed(t *testing.T) {
 	s := newTestStore(t)
 	longDesc := strings.Repeat("a", 100000)
-	task, err := s.CreateTask(ctx(), "Task", longDesc, 0, nil, nil)
+	task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Description: longDesc})
 	if err != nil {
 		t.Fatalf("expected no error for long description, got %v", err)
 	}
@@ -43,7 +43,7 @@ func TestValidation_LongDescriptionAllowed(t *testing.T) {
 
 func TestValidation_InvalidTagChars(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.CreateTask(ctx(), "Task", "", 0, nil, []string{"invalid tag!"})
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Tags: []string{"invalid tag!"}})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "tag" {
 		t.Errorf("expected ValidationError on tag, got %v", err)
@@ -52,7 +52,7 @@ func TestValidation_InvalidTagChars(t *testing.T) {
 
 func TestValidation_EmptyTag(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.CreateTask(ctx(), "Task", "", 0, nil, []string{""})
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Tags: []string{""}})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("expected ValidationError for empty tag, got %v", err)
@@ -61,7 +61,7 @@ func TestValidation_EmptyTag(t *testing.T) {
 
 func TestValidation_EmptyNoteText(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	_, err := s.AddNote(ctx(), &task.ID, "")
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
@@ -71,7 +71,7 @@ func TestValidation_EmptyNoteText(t *testing.T) {
 
 func TestValidation_EmptyLinkURL(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "", "")
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
@@ -105,7 +105,7 @@ func TestValidation_BulkMaxIDs(t *testing.T) {
 
 func TestValidation_TitleInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.CreateTask(ctx(), "hello\xff\xfeworld", "", 0, nil, nil)
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "hello\xff\xfeworld"})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "title" {
 		t.Errorf("expected ValidationError on title for invalid UTF-8, got %v", err)
@@ -114,7 +114,7 @@ func TestValidation_TitleInvalidUTF8(t *testing.T) {
 
 func TestValidation_TitleNullByte(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.CreateTask(ctx(), "hello\x00world", "", 0, nil, nil)
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "hello\x00world"})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "title" {
 		t.Errorf("expected ValidationError on title for null byte, got %v", err)
@@ -125,7 +125,7 @@ func TestValidation_TitleNFCNormalization(t *testing.T) {
 	s := newTestStore(t)
 	// NFD: e + combining acute accent
 	nfdTitle := "caf\u0065\u0301"
-	task, err := s.CreateTask(ctx(), nfdTitle, "", 0, nil, nil)
+	task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: nfdTitle})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestValidation_TitleRuneLimit(t *testing.T) {
 	if utf8.RuneCountInString(title512) != 512 {
 		t.Fatalf("test setup: expected 512 runes, got %d", utf8.RuneCountInString(title512))
 	}
-	task, err := s.CreateTask(ctx(), title512, "", 0, nil, nil)
+	task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: title512})
 	if err != nil {
 		t.Fatalf("512 CJK chars should succeed, got %v", err)
 	}
@@ -153,7 +153,7 @@ func TestValidation_TitleRuneLimit(t *testing.T) {
 
 	// 513 CJK characters should fail
 	title513 := strings.Repeat("\u4e16", 513)
-	_, err = s.CreateTask(ctx(), title513, "", 0, nil, nil)
+	_, err = s.CreateTask(ctx(), store.CreateTaskOptions{Title: title513})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "title" {
 		t.Errorf("513 CJK chars should fail validation, got %v", err)
@@ -162,7 +162,7 @@ func TestValidation_TitleRuneLimit(t *testing.T) {
 
 func TestValidation_DescriptionInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.CreateTask(ctx(), "Task", "bad\xffbytes", 0, nil, nil)
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Description: "bad\xffbytes"})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "description" {
 		t.Errorf("expected ValidationError on description, got %v", err)
@@ -172,7 +172,7 @@ func TestValidation_DescriptionInvalidUTF8(t *testing.T) {
 func TestValidation_DescriptionTooLong(t *testing.T) {
 	s := newTestStore(t)
 	longDesc := strings.Repeat("a", 100001)
-	_, err := s.CreateTask(ctx(), "Task", longDesc, 0, nil, nil)
+	_, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Description: longDesc})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "description" {
 		t.Errorf("expected ValidationError on description for >100000 chars, got %v", err)
@@ -181,7 +181,7 @@ func TestValidation_DescriptionTooLong(t *testing.T) {
 
 func TestValidation_NoteInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	_, err := s.AddNote(ctx(), &task.ID, "bad\xffnote")
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "text" {
@@ -191,7 +191,7 @@ func TestValidation_NoteInvalidUTF8(t *testing.T) {
 
 func TestValidation_NoteTooLong(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	longNote := strings.Repeat("a", 50001)
 	_, err := s.AddNote(ctx(), &task.ID, longNote)
 	var ve *model.ValidationError
@@ -202,7 +202,7 @@ func TestValidation_NoteTooLong(t *testing.T) {
 
 func TestValidation_URLInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com/\xff", "")
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "url" {
@@ -212,7 +212,7 @@ func TestValidation_URLInvalidUTF8(t *testing.T) {
 
 func TestValidation_LinkDescriptionTooLong(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	tooLong := strings.Repeat("a", 1001)
 	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com", tooLong)
 	var ve *model.ValidationError
@@ -223,7 +223,7 @@ func TestValidation_LinkDescriptionTooLong(t *testing.T) {
 
 func TestValidation_LinkDescriptionInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	_, err := s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com", "bad\xffdesc")
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "description" {
@@ -233,7 +233,7 @@ func TestValidation_LinkDescriptionInvalidUTF8(t *testing.T) {
 
 func TestValidation_LinkDescriptionEmptyAllowed(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	link, err := s.AddLink(ctx(), task.ID, model.LinkURL, "https://example.com", "")
 	if err != nil {
 		t.Fatalf("empty description on AddLink should be allowed: %v", err)
@@ -256,7 +256,7 @@ func TestValidation_SearchQueryInvalidUTF8(t *testing.T) {
 func TestValidation_TagWithWhitespace(t *testing.T) {
 	s := newTestStore(t)
 	// Tag with leading/trailing whitespace should be trimmed and accepted
-	task, err := s.CreateTask(ctx(), "Task", "", 0, nil, []string{" my-tag "})
+	task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Tags: []string{" my-tag "}})
 	if err != nil {
 		t.Fatalf("tag with whitespace should be accepted after trimming, got %v", err)
 	}
@@ -267,7 +267,7 @@ func TestValidation_TagWithWhitespace(t *testing.T) {
 
 func TestValidation_UpdateTaskNFCNormalization(t *testing.T) {
 	s := newTestStore(t)
-	task, err := s.CreateTask(ctx(), "Original", "", 0, nil, nil)
+	task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Original"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestValidation_UpdateTaskNFCNormalization(t *testing.T) {
 
 func TestValidation_UpdateNoteInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	note, err := s.AddNote(ctx(), &task.ID, "valid note")
 	if err != nil {
 		t.Fatalf("add note: %v", err)
@@ -310,7 +310,7 @@ func TestValidation_UpdateNoteInvalidUTF8(t *testing.T) {
 
 func TestValidation_RemoveTagsInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, []string{"valid"})
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Tags: []string{"valid"}})
 	err := s.RemoveTags(ctx(), task.ID, []string{"bad\xff"})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "tag" {
@@ -320,7 +320,7 @@ func TestValidation_RemoveTagsInvalidUTF8(t *testing.T) {
 
 func TestValidation_BulkRemoveTagsInvalidUTF8(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, []string{"valid"})
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task", Tags: []string{"valid"}})
 	err := s.BulkRemoveTags(ctx(), []uint{task.ID}, []string{"bad\xff"})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) || ve.Field != "tag" {
@@ -330,7 +330,7 @@ func TestValidation_BulkRemoveTagsInvalidUTF8(t *testing.T) {
 
 func TestValidation_NoteExactBoundary(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
 	// Exactly 50000 chars should pass
 	note50k := strings.Repeat("a", 50000)
@@ -343,7 +343,7 @@ func TestValidation_NoteExactBoundary(t *testing.T) {
 func TestValidation_NFCTitleReadBack(t *testing.T) {
 	s := newTestStore(t)
 	nfdTitle := "caf\u0065\u0301"
-	task, err := s.CreateTask(ctx(), nfdTitle, "", 0, nil, nil)
+	task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: nfdTitle})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestValidation_NFCTitleReadBack(t *testing.T) {
 
 func TestValidation_TagsMax50(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "Task", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
 	// Add 50 tags
 	tags := make([]string, 50)

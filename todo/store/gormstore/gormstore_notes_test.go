@@ -63,8 +63,8 @@ func TestNotes_AddNoteNilTaskID_NoTaskCheck(t *testing.T) {
 
 func TestNotes_Reparent(t *testing.T) {
 	s := newTestStore(t)
-	t1, _ := s.CreateTask(ctx(), "T1", "", 0, nil, nil)
-	t2, _ := s.CreateTask(ctx(), "T2", "", 0, nil, nil)
+	t1, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T1"})
+	t2, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T2"})
 	note, _ := s.AddNote(ctx(), &t1.ID, "n")
 
 	updated, err := s.UpdateNote(ctx(), note.ID, store.UpdateNoteOptions{
@@ -87,7 +87,7 @@ func TestNotes_Reparent(t *testing.T) {
 
 func TestNotes_OrphanByClearingTaskID(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	note, _ := s.AddNote(ctx(), &task.ID, "n")
 
 	updated, err := s.UpdateNote(ctx(), note.ID, store.UpdateNoteOptions{
@@ -129,7 +129,7 @@ func TestNotes_ArchiveStandalone(t *testing.T) {
 
 func TestNotes_ListAllNotes(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	s.AddNote(ctx(), &task.ID, "attached")
 	s.AddNote(ctx(), nil, "standalone")
 
@@ -155,7 +155,7 @@ func TestNotes_UpdateNote_NoFields_Errors(t *testing.T) {
 
 func TestNotes_UpdateNote_ReparentToArchivedFails(t *testing.T) {
 	s := newTestStore(t)
-	archived, _ := s.CreateTask(ctx(), "Archived", "", 0, nil, nil)
+	archived, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Archived"})
 	if err := s.ArchiveTask(ctx(), archived.ID, true); err != nil {
 		t.Fatalf("archive: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestNote_JSON_OmitsTaskIDWhenNil(t *testing.T) {
 		t.Errorf("standalone note JSON should omit task_id, got: %s", b)
 	}
 
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	attached, _ := s.AddNote(ctx(), &task.ID, "n2")
 	b2, _ := json.Marshal(attached)
 	if !strings.Contains(string(b2), `"task_id"`) {
@@ -192,7 +192,7 @@ func TestNote_JSON_OmitsTaskIDWhenNil(t *testing.T) {
 
 func TestDeleteTask_OrphansNotesByDefault(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	note, _ := s.AddNote(ctx(), &task.ID, "n")
 
 	if err := s.DeleteTask(ctx(), task.ID, store.DeleteTaskOptions{}); err != nil {
@@ -206,7 +206,7 @@ func TestDeleteTask_OrphansNotesByDefault(t *testing.T) {
 
 func TestDeleteTask_DeleteNotesFlag(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	s.AddNote(ctx(), &task.ID, "n")
 
 	if err := s.DeleteTask(ctx(), task.ID, store.DeleteTaskOptions{DeleteNotes: true}); err != nil {
@@ -220,8 +220,8 @@ func TestDeleteTask_DeleteNotesFlag(t *testing.T) {
 
 func TestDeleteTask_RecursiveOrphansAllSubtreeNotes(t *testing.T) {
 	s := newTestStore(t)
-	parent, _ := s.CreateTask(ctx(), "Parent", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "Child", "", 0, nil, nil)
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Parent"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Child"})
 	s.SetParent(ctx(), child.ID, &parent.ID)
 	s.AddNote(ctx(), &parent.ID, "p-note")
 	s.AddNote(ctx(), &child.ID, "c-note")
@@ -242,7 +242,7 @@ func TestDeleteTask_RecursiveOrphansAllSubtreeNotes(t *testing.T) {
 
 func TestDeleteTask_OrphanEvent_Emitted(t *testing.T) {
 	s := newTestStore(t)
-	task, _ := s.CreateTask(ctx(), "T", "", 0, nil, nil)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	note, _ := s.AddNote(ctx(), &task.ID, "n")
 
 	obs := &recordingObserver{}
@@ -274,9 +274,9 @@ func TestDeleteTask_OrphanEvent_Emitted(t *testing.T) {
 
 func TestDeleteTask_TransactionRollback_NoOrphanEvents(t *testing.T) {
 	s := newTestStore(t)
-	external, _ := s.CreateTask(ctx(), "external", "", 0, nil, nil)
-	parent, _ := s.CreateTask(ctx(), "parent", "", 0, nil, nil)
-	child, _ := s.CreateTask(ctx(), "child", "", 0, nil, nil)
+	external, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "external"})
+	parent, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "parent"})
+	child, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "child"})
 	s.SetParent(ctx(), child.ID, &parent.ID)
 	s.AddNote(ctx(), &child.ID, "n")
 	// child blocks an external task -> recursive delete must abort.
