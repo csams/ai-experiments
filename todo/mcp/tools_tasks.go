@@ -414,13 +414,16 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	// set_task_archived
 	srv.AddTool(mcpgo.NewTool("set_task_archived",
 		mcpgo.WithDescription("Set the archived flag on one or more tasks (1..100 IDs). "+
-			"Archiving cascades to each task's entire subtask tree. Unarchiving validates "+
-			"preserved blocker relationships. Each task is processed independently — "+
-			"if a task fails (e.g. it blocks an external task while archiving), the call "+
-			"aborts at that point with the prefix already committed. On error the caller "+
-			"should re-query archived state to determine which IDs were processed. "+
+			"Atomic across the entire array: archiving cascades to each task's subtask tree, "+
+			"and any rejection (e.g. an affected task blocks an external task while archiving) "+
+			"rolls back the whole batch — no partial commit. "+
+			"Cross-input blockers are permitted: if A blocks B and both are in the call, the "+
+			"external-blocker check treats the union of all input subtrees as the 'set' so the "+
+			"call succeeds. Unarchiving cleans up stale blocker rows (blockers that are now "+
+			"Done or archived) and re-Unblocked tasks whose blocker count drops to zero. "+
 			"Empty `ids` arrays are rejected client-side. "+
-			"Returns full detail for every task processed."),
+			"Returns full detail for each input ID in input order (duplicates collapsed to "+
+			"first occurrence)."),
 		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 		mcpgo.WithBoolean("archived", mcpgo.Required(), mcpgo.Description("Target archive state: true to archive, false to unarchive")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -432,16 +435,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 			return errResult(fmt.Errorf("ids: max %d per call", maxBulkMCPIDs)), nil
 		}
 		archived := getBool(req, "archived")
-		details := make([]*model.TaskDetail, 0, len(ids))
-		for _, id := range ids {
-			if err := s.ArchiveTask(ctx, id, archived); err != nil {
-				return errResult(err), nil
-			}
-			detail, err := s.GetTask(ctx, id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
-			if err != nil {
-				return errResult(err), nil
-			}
-			details = append(details, detail)
+		details, err := s.BulkSetArchived(ctx, ids, archived)
+		if err != nil {
+			return errResult(err), nil
 		}
 		return textResult(toJSON(details)), nil
 	})

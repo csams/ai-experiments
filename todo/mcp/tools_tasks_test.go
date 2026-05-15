@@ -287,10 +287,11 @@ func TestUpdateBlockers_OldToolsRemoved(t *testing.T) {
 	}
 }
 
-// TestSetTaskArchived_MidArrayFailureLeavesPrefix verifies the partial-failure
-// behavior documented in the tool description: when one ID fails, earlier IDs
-// remain in their new state.
-func TestSetTaskArchived_MidArrayFailureLeavesPrefix(t *testing.T) {
+// TestSetTaskArchived_MidArrayFailureRollsBackWholeBatch verifies the atomic
+// contract introduced in PR-3: when one ID fails, every prior ID in the array
+// is rolled back too. The previous broken behavior left an archived prefix
+// that callers had to re-query to find.
+func TestSetTaskArchived_MidArrayFailureRollsBackWholeBatch(t *testing.T) {
 	c, s := newMCPTestClient(t)
 	ctx := context.Background()
 
@@ -310,12 +311,14 @@ func TestSetTaskArchived_MidArrayFailureLeavesPrefix(t *testing.T) {
 		t.Logf("error text: %s", resultText(t, res))
 	}
 
+	// Atomicity contract: neither A nor B should be archived after the call
+	// aborted on the missing middle ID.
 	aDetail, _ := s.GetTask(ctx, a.ID, store.GetTaskOptions{})
-	if !aDetail.Archived {
-		t.Errorf("prefix task A should be archived (partial-progress contract); got Archived=false")
+	if aDetail.Archived {
+		t.Errorf("task A should not be archived: failure must roll back the entire batch (got Archived=true)")
 	}
 	bDetail, _ := s.GetTask(ctx, b.ID, store.GetTaskOptions{})
 	if bDetail.Archived {
-		t.Errorf("trailing task B should NOT be archived after mid-array failure")
+		t.Errorf("task B should not be archived: failure must roll back the entire batch (got Archived=true)")
 	}
 }

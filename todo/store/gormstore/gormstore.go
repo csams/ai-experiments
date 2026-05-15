@@ -1585,28 +1585,92 @@ func (s *GormStore) SetParent(ctx context.Context, id uint, parentID *uint) erro
 	return nil
 }
 
+// ArchiveTask is a single-ID shim around BulkSetArchived preserved for the
+// CLI's `task archive` / `task unarchive` callers, which don't need the
+// returned detail slice.
 func (s *GormStore) ArchiveTask(ctx context.Context, id uint, archived bool) error {
-	if err := validateID(id); err != nil {
-		return err
+	_, err := s.BulkSetArchived(ctx, []uint{id}, archived)
+	return err
+}
+
+// BulkSetArchived flips the archived flag on every task in ids (plus their
+// descendants) in one transaction. See the Store-interface comment for the
+// rules; the implementation notes below cover the subtle bits.
+func (s *GormStore) BulkSetArchived(ctx context.Context, ids []uint, archived bool) ([]model.TaskDetail, error) {
+	if len(ids) == 0 {
+		return nil, &model.ValidationError{Field: "ids", Message: "must not be empty"}
+	}
+	if len(ids) > maxBulkIDs {
+		return nil, &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
+	}
+
+	// Validate and dedup, preserving caller order for the response.
+	seen := make(map[uint]bool, len(ids))
+	uniqueIDs := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if err := validateID(id); err != nil {
+			return nil, err
+		}
+		if !seen[id] {
+			seen[id] = true
+			uniqueIDs = append(uniqueIDs, id)
+		}
 	}
 
 	db := s.db.WithContext(ctx)
-	var subtreeIDs []uint
+	// affectedIDs is the deduplicated union of every input subtree, sorted
+	// ascending for a deterministic event payload.
+	var affectedIDs []uint
 	err := db.Transaction(func(tx *gorm.DB) error {
-		var err error
-		subtreeIDs, err = s.collectSubtreeIDs(tx, id)
-		if err != nil {
-			return err
+		// Confirm every input task exists before any side effects.
+		// collectSubtreeIDs returns an empty slice for a missing root
+		// rather than an error, so the explicit existence pre-check is
+		// what surfaces ErrNotFound for callers.
+		for _, id := range uniqueIDs {
+			if _, err := s.taskExists(tx, id); err != nil {
+				return err
+			}
 		}
 
+		// Build the union of all subtree IDs.
+		unionSet := make(map[uint]struct{})
+		for _, id := range uniqueIDs {
+			subtree, err := s.collectSubtreeIDs(tx, id)
+			if err != nil {
+				return err
+			}
+			for _, sid := range subtree {
+				unionSet[sid] = struct{}{}
+			}
+		}
+		affectedIDs = make([]uint, 0, len(unionSet))
+		for id := range unionSet {
+			affectedIDs = append(affectedIDs, id)
+		}
+		sort.Slice(affectedIDs, func(i, j int) bool { return affectedIDs[i] < affectedIDs[j] })
+
+		// inUnion lets the unarchive cleanup loop tell "blocker is in this
+		// same batch (so it will be unarchived alongside)" apart from
+		// "blocker is archived outside the batch (so this row is stale)."
+		// Without this guard, symmetrically unarchiving an A-blocks-B pair
+		// would delete B's blocker row because the loop sees A.Archived=true
+		// before the trailing Update flips it to false — a regression vs.
+		// the previous loop-of-ArchiveTask path.
+		inUnion := unionSet
+
 		if archived {
-			// Check external blockers
-			if err := s.checkExternalBlockers(tx, subtreeIDs); err != nil {
+			// Cross-input blockers are intentionally permitted: a task in
+			// the union blocking another task in the union does not count
+			// as "external." This is the key semantic improvement over the
+			// previous per-ID loop, which would reject the call when two
+			// related tasks were archived together.
+			if err := s.checkExternalBlockers(tx, affectedIDs); err != nil {
 				return err
 			}
 		} else {
-			// On unarchive, validate preserved blocker relationships
-			for _, tid := range subtreeIDs {
+			// Unarchive path: per-task stale-blocker cleanup. Iteration
+			// order doesn't matter — each task's cleanup is independent.
+			for _, tid := range affectedIDs {
 				var blockerIDs []uint
 				if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", tid).Pluck("blocker_id", &blockerIDs).Error; err != nil {
 					return err
@@ -1614,20 +1678,26 @@ func (s *GormStore) ArchiveTask(ctx context.Context, id uint, archived bool) err
 				for _, bid := range blockerIDs {
 					var blocker model.Task
 					if err := tx.First(&blocker, bid).Error; err != nil {
-						// Blocker no longer exists — clean up
+						// Blocker no longer exists — clean up.
 						if err := tx.Where("task_id = ? AND blocker_id = ?", tid, bid).Delete(&model.TaskBlocker{}).Error; err != nil {
 							return err
 						}
 						continue
 					}
-					if blocker.State == model.StateDone || blocker.Archived {
-						// Blocker is Done or Archived — clean up
+					_, blockerInBatch := inUnion[bid]
+					if blocker.State == model.StateDone || (blocker.Archived && !blockerInBatch) {
+						// Done is unconditional — a Done blocker is permanently
+						// stale regardless of batch membership. Archived is
+						// gated on the in-batch check because in-batch
+						// blockers are about to be unarchived alongside.
 						if err := tx.Where("task_id = ? AND blocker_id = ?", tid, bid).Delete(&model.TaskBlocker{}).Error; err != nil {
 							return err
 						}
 					}
 				}
-				// If task was Blocked and has no more blockers, transition to Unblocked
+				// If the task was Blocked and now has no remaining blockers,
+				// transition to Unblocked (auto-transition mirror of the path
+				// in RemoveBlockers / UpdateBlockers).
 				var remaining int64
 				if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", tid).Count(&remaining).Error; err != nil {
 					return err
@@ -1641,10 +1711,10 @@ func (s *GormStore) ArchiveTask(ctx context.Context, id uint, archived bool) err
 			}
 		}
 
-		return tx.Model(&model.Task{}).Where("id IN ?", subtreeIDs).Update("archived", archived).Error
+		return tx.Model(&model.Task{}).Where("id IN ?", affectedIDs).Update("archived", archived).Error
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	eventType := "task.archived"
@@ -1653,10 +1723,21 @@ func (s *GormStore) ArchiveTask(ctx context.Context, id uint, archived bool) err
 	}
 	s.emit(ctx, store.StoreEvent{
 		Type:    eventType,
-		TaskIDs: subtreeIDs,
+		TaskIDs: affectedIDs,
 	})
 
-	return nil
+	// Load full detail for each input ID in input order. Done outside the
+	// transaction; the rows are already committed and the read is the same
+	// shape the MCP caller previously performed per-ID.
+	details := make([]model.TaskDetail, 0, len(uniqueIDs))
+	for _, id := range uniqueIDs {
+		d, err := s.GetTask(ctx, id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+		if err != nil {
+			return nil, fmt.Errorf("reload task %d: %w", id, err)
+		}
+		details = append(details, *d)
+	}
+	return details, nil
 }
 
 func (s *GormStore) DeleteTask(ctx context.Context, id uint, opts store.DeleteTaskOptions) error {

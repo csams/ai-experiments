@@ -34,7 +34,28 @@ type Store interface {
 	RemoveBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error)
 	UpdateBlockers(ctx context.Context, taskID uint, add, remove []uint) (*model.Task, error) // combined add+remove in one txn; at least one of add/remove must be non-empty
 	SetParent(ctx context.Context, id uint, parentID *uint) error
+	// ArchiveTask is a thin convenience wrapper over BulkSetArchived for the
+	// single-ID case; it preserves the older error-only return shape used by
+	// the CLI.
 	ArchiveTask(ctx context.Context, id uint, archived bool) error
+	// BulkSetArchived sets archived = archived on every task in ids and on
+	// every descendant of those tasks, in a single transaction. The whole
+	// call is atomic — any rejected task rolls back the entire batch (in
+	// contrast to the previous loop-of-ArchiveTask path that left committed
+	// prefixes on failure).
+	//
+	// When archived = true, the external-blocker check is run against the
+	// *union* of all input subtrees, so cross-input blockers (A blocks B,
+	// both in the batch) do not falsely trip the check. When archived =
+	// false, the per-task stale-blocker cleanup loop preserves rows whose
+	// blocker is itself in the batch — those blockers are about to be
+	// unarchived alongside, so the row is not actually stale. Cleanup
+	// still drops rows whose blocker is Done (unconditional) or archived
+	// outside the batch.
+	//
+	// Returns full task detail for each input ID in input order
+	// (duplicates collapsed to first occurrence). 0 < len(ids) <= 100.
+	BulkSetArchived(ctx context.Context, ids []uint, archived bool) ([]model.TaskDetail, error)
 	DeleteTask(ctx context.Context, id uint, opts DeleteTaskOptions) error
 	SearchTasks(ctx context.Context, query string) ([]model.Task, error)
 

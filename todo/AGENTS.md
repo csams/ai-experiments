@@ -80,7 +80,7 @@ Add to your MCP settings:
 
 `create_task` accepts an optional `parent_id` (omit for top-level, set to create a subtask under an existing non-archived parent) and an optional `links` array. Each link item is `{type, url, description}` (description optional). Inline links are inserted in the same transaction as the task, so any link-validation failure rolls the whole call back. Only one `task.created` event fires regardless of link count — the vector syncer re-embeds the task once with link descriptions included. Prefer inline `links` over per-link `add_link` calls when creating a task that already has its references in hand: it is atomic and avoids the per-link re-embed churn. `create_task` returns full task detail by default; pass an `include` array to restrict expensive fields.
 
-`set_task_state`, `set_task_priority`, and `set_task_archived` all accept an `ids` array (1..100). Single-task callers pass `ids: [42]`. The mutations are atomic across the whole array (except `set_task_archived`, which is per-task atomic but not cross-task atomic — see its tool description). `set_task_priority` promotes blockers to at least match the priority of any task they block.
+`set_task_state`, `set_task_priority`, and `set_task_archived` all accept an `ids` array (1..100). Single-task callers pass `ids: [42]`. The mutations are atomic across the whole array. `set_task_priority` promotes blockers to at least match the priority of any task they block.
 
 **Notes:** `add_note`, `update_note`, `list_notes`, `delete_note`
 
@@ -167,6 +167,14 @@ Transitioning a Blocked task to any non-Done state (e.g. `Progressing`, `New`) n
 - Done is still terminal — Done transitions always clear the task's blocker rows and auto-unblock dependents, no flag required.
 - Non-Blocked tasks are unaffected (there are no blocker rows to preserve).
 - Store interface change: `Store.SetTaskState` and `Store.BulkUpdateState` now take a `store.SetTaskStateOptions{ForceClearBlockers}` argument. The CLI commands above route through it.
+
+**Migration callout (breaking change — `set_task_archived` is now atomic):**
+The previous `set_task_archived` implementation looped `ArchiveTask` per ID outside any wrapping transaction, leaving a committed prefix when one ID failed mid-batch. The tool now wraps the entire array in a single transaction via the new `Store.BulkSetArchived(ids, archived) -> []TaskDetail`.
+
+- Failure of any ID rolls back the whole batch — no partial commit. Callers that previously had to re-query archived state on error no longer need to.
+- Cross-input blockers are intentionally permitted: if A blocks B and both IDs are in the call, the external-blocker check treats the union of all input subtrees as the "set," so the call succeeds (where the per-ID loop would have rejected it).
+- Response is `[]TaskDetail` in input order with duplicates collapsed to first occurrence (matches `get_tasks` semantics).
+- `Store.ArchiveTask(id, archived)` is preserved as a thin wrapper over `BulkSetArchived([id], archived)` so the CLI `task archive` / `task unarchive` callers are unaffected.
 
 **Migration callout (breaking change — `Unblocked` is no longer directly settable):**
 The `set_task_state` MCP enum drops `Unblocked`; the store rejects it with `ErrInvalidState`. `Unblocked` was always meant to be a transient auto-transition that fires when a Blocked task's last blocker is removed, not a target a user picks. Manually setting it had no well-defined meaning.
