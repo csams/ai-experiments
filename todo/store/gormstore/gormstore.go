@@ -1659,24 +1659,6 @@ func (s *GormStore) SearchTasks(ctx context.Context, query string) ([]model.Task
 	return tasks, err
 }
 
-func (s *GormStore) SearchNotes(ctx context.Context, query string, opts store.SearchNotesOptions) ([]model.Note, error) {
-	var err error
-	if query, err = validateSearchQuery(query); err != nil {
-		return nil, err
-	}
-	db := s.db.WithContext(ctx)
-	pattern := "%" + escapeLike(strings.ToLower(query)) + "%"
-	q := db.Where("LOWER(text) LIKE ? ESCAPE '\\'", pattern)
-	if !opts.IncludeArchived {
-		q = q.Where("archived = ?", false)
-	}
-	if opts.TaskID != nil {
-		q = q.Where("task_id = ?", *opts.TaskID)
-	}
-	var notes []model.Note
-	err = q.Limit(defaultQueryLimit).Find(&notes).Error
-	return notes, err
-}
 
 // --- Bulk operations ---
 
@@ -2238,26 +2220,51 @@ func (s *GormStore) UpdateNote(ctx context.Context, noteID uint, opts store.Upda
 	return &note, nil
 }
 
-func (s *GormStore) ListNotes(ctx context.Context, taskID *uint) ([]model.Note, error) {
-	if err := validateOptionalTaskID(taskID); err != nil {
+func (s *GormStore) ListNotes(ctx context.Context, opts store.ListNotesOptions) ([]model.Note, error) {
+	if err := validateOptionalTaskID(opts.TaskID); err != nil {
 		return nil, err
 	}
-	db := s.db.WithContext(ctx)
-	var notes []model.Note
-	q := db.Model(&model.Note{})
-	if taskID == nil {
-		q = q.Where("task_id IS NULL")
-	} else {
-		q = q.Where("task_id = ?", *taskID)
+	switch opts.Scope {
+	case store.NoteScopeAll, store.NoteScopeStandalone, store.NoteScopeAttached:
+	default:
+		return nil, &model.ValidationError{Field: "scope", Message: "must be one of \"\", \"standalone\", \"attached\""}
 	}
-	err := q.Order("created_at ASC").Find(&notes).Error
-	return notes, err
-}
 
-func (s *GormStore) ListAllNotes(ctx context.Context) ([]model.Note, error) {
-	db := s.db.WithContext(ctx)
+	q := s.db.WithContext(ctx).Model(&model.Note{})
+	if opts.TaskID != nil {
+		q = q.Where("task_id = ?", *opts.TaskID)
+	} else {
+		switch opts.Scope {
+		case store.NoteScopeStandalone:
+			q = q.Where("task_id IS NULL")
+		case store.NoteScopeAttached:
+			q = q.Where("task_id IS NOT NULL")
+		}
+	}
+	if !opts.IncludeArchived {
+		q = q.Where("archived = ?", false)
+	}
+	if opts.Query != "" {
+		query, err := validateSearchQuery(opts.Query)
+		if err != nil {
+			return nil, err
+		}
+		pattern := "%" + escapeLike(strings.ToLower(query)) + "%"
+		q = q.Where("LOWER(text) LIKE ? ESCAPE '\\'", pattern)
+	}
+
+	limit := opts.Limit
+	if limit == 0 && opts.Query != "" {
+		// Preserve the prior SearchNotes default cap so a common substring
+		// across many notes doesn't quietly return an unbounded result set.
+		limit = defaultQueryLimit
+	}
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+
 	var notes []model.Note
-	err := db.Order("created_at ASC").Find(&notes).Error
+	err := q.Order("created_at ASC").Find(&notes).Error
 	return notes, err
 }
 

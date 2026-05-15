@@ -25,8 +25,8 @@ func TestNotes_StandaloneCRUD(t *testing.T) {
 		t.Errorf("standalone note has TaskID = %v, want nil", note.TaskID)
 	}
 
-	// ListNotes(nil) → standalone-only.
-	standalone, err := s.ListNotes(ctx(), nil)
+	// Scope=standalone → orphan-only.
+	standalone, err := s.ListNotes(ctx(), store.ListNotesOptions{Scope: store.NoteScopeStandalone})
 	if err != nil {
 		t.Fatalf("list standalone: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestNotes_StandaloneCRUD(t *testing.T) {
 	if err := s.DeleteNote(ctx(), note.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	standalone, _ = s.ListNotes(ctx(), nil)
+	standalone, _ = s.ListNotes(ctx(), store.ListNotesOptions{Scope: store.NoteScopeStandalone})
 	if len(standalone) != 0 {
 		t.Errorf("after delete, standalone count = %d, want 0", len(standalone))
 	}
@@ -78,8 +78,8 @@ func TestNotes_Reparent(t *testing.T) {
 		t.Errorf("reparented TaskID = %v, want %d", updated.TaskID, t2.ID)
 	}
 
-	t1Notes, _ := s.ListNotes(ctx(), &t1.ID)
-	t2Notes, _ := s.ListNotes(ctx(), &t2.ID)
+	t1Notes, _ := s.ListNotes(ctx(), store.ListNotesOptions{TaskID: &t1.ID})
+	t2Notes, _ := s.ListNotes(ctx(), store.ListNotesOptions{TaskID: &t2.ID})
 	if len(t1Notes) != 0 || len(t2Notes) != 1 {
 		t.Errorf("expected note to move from t1 (now %d) to t2 (now %d)", len(t1Notes), len(t2Notes))
 	}
@@ -100,7 +100,7 @@ func TestNotes_OrphanByClearingTaskID(t *testing.T) {
 	if updated.TaskID != nil {
 		t.Errorf("expected TaskID to be cleared, got %v", updated.TaskID)
 	}
-	standalone, _ := s.ListNotes(ctx(), nil)
+	standalone, _ := s.ListNotes(ctx(), store.ListNotesOptions{Scope: store.NoteScopeStandalone})
 	if len(standalone) != 1 {
 		t.Errorf("standalone count after clear = %d, want 1", len(standalone))
 	}
@@ -113,7 +113,7 @@ func TestNotes_ArchiveStandalone(t *testing.T) {
 	if err := s.ArchiveNote(ctx(), note.ID, true); err != nil {
 		t.Fatalf("archive: %v", err)
 	}
-	all, _ := s.ListAllNotes(ctx())
+	all, _ := s.ListNotes(ctx(), store.ListNotesOptions{IncludeArchived: true})
 	if len(all) != 1 || !all[0].Archived {
 		t.Errorf("archive flag not persisted: %+v", all)
 	}
@@ -121,24 +121,139 @@ func TestNotes_ArchiveStandalone(t *testing.T) {
 	if err := s.ArchiveNote(ctx(), note.ID, false); err != nil {
 		t.Fatalf("unarchive: %v", err)
 	}
-	all, _ = s.ListAllNotes(ctx())
+	all, _ = s.ListNotes(ctx(), store.ListNotesOptions{IncludeArchived: true})
 	if all[0].Archived {
 		t.Errorf("unarchive failed: %+v", all)
 	}
 }
 
-func TestNotes_ListAllNotes(t *testing.T) {
+func TestNotes_ListAll(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
 	s.AddNote(ctx(), &task.ID, "attached")
 	s.AddNote(ctx(), nil, "standalone")
 
-	all, err := s.ListAllNotes(ctx())
+	all, err := s.ListNotes(ctx(), store.ListNotesOptions{})
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
 	if len(all) != 2 {
-		t.Errorf("ListAllNotes returned %d, want 2", len(all))
+		t.Errorf("default scope returned %d, want 2", len(all))
+	}
+}
+
+func TestNotes_ListScopeAttached(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	s.AddNote(ctx(), &task.ID, "attached")
+	s.AddNote(ctx(), nil, "standalone")
+
+	attached, err := s.ListNotes(ctx(), store.ListNotesOptions{Scope: store.NoteScopeAttached})
+	if err != nil {
+		t.Fatalf("list attached: %v", err)
+	}
+	if len(attached) != 1 || attached[0].TaskID == nil {
+		t.Errorf("attached scope got %+v", attached)
+	}
+}
+
+func TestNotes_ListQueryFilter(t *testing.T) {
+	s := newTestStore(t)
+	s.AddNote(ctx(), nil, "alpha bravo")
+	s.AddNote(ctx(), nil, "charlie delta")
+
+	got, err := s.ListNotes(ctx(), store.ListNotesOptions{Query: "alpha"})
+	if err != nil {
+		t.Fatalf("list query: %v", err)
+	}
+	if len(got) != 1 || got[0].Text != "alpha bravo" {
+		t.Errorf("query filter got %+v", got)
+	}
+}
+
+func TestNotes_TaskIDOverridesScope(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	attached, _ := s.AddNote(ctx(), &task.ID, "attached")
+	s.AddNote(ctx(), nil, "orphan")
+
+	// TaskID is set together with Scope=Standalone; TaskID must win.
+	got, err := s.ListNotes(ctx(), store.ListNotesOptions{
+		TaskID: &task.ID,
+		Scope:  store.NoteScopeStandalone,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != attached.ID {
+		t.Errorf("TaskID should override Scope; got %+v", got)
+	}
+}
+
+func TestNotes_AttachedExcludesArchivedByDefault(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	live, _ := s.AddNote(ctx(), &task.ID, "live attached")
+	archived, _ := s.AddNote(ctx(), &task.ID, "archived attached")
+	if err := s.ArchiveNote(ctx(), archived.ID, true); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+
+	got, err := s.ListNotes(ctx(), store.ListNotesOptions{Scope: store.NoteScopeAttached})
+	if err != nil {
+		t.Fatalf("list attached: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != live.ID {
+		t.Errorf("attached+default should exclude archived; got %+v", got)
+	}
+
+	withArchived, err := s.ListNotes(ctx(), store.ListNotesOptions{
+		Scope:           store.NoteScopeAttached,
+		IncludeArchived: true,
+	})
+	if err != nil {
+		t.Fatalf("list attached include_archived: %v", err)
+	}
+	if len(withArchived) != 2 {
+		t.Errorf("attached+include_archived count = %d, want 2", len(withArchived))
+	}
+}
+
+func TestNotes_InvalidScopeRejected(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.ListNotes(ctx(), store.ListNotesOptions{Scope: store.NoteScope("bogus")})
+	var ve *model.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError for invalid scope, got %v", err)
+	}
+	if ve.Field != "scope" {
+		t.Errorf("ValidationError.Field = %q, want %q", ve.Field, "scope")
+	}
+}
+
+func TestNotes_QueryAppliesDefaultLimit(t *testing.T) {
+	s := newTestStore(t)
+	// Create enough matching notes to exceed defaultQueryLimit (200).
+	for i := 0; i < 205; i++ {
+		if _, err := s.AddNote(ctx(), nil, "needle"); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+	}
+	got, err := s.ListNotes(ctx(), store.ListNotesOptions{Query: "needle"})
+	if err != nil {
+		t.Fatalf("list query: %v", err)
+	}
+	if len(got) != 200 {
+		t.Errorf("query without explicit Limit should default-cap at 200; got %d", len(got))
+	}
+
+	// Explicit Limit > 0 overrides the default cap.
+	got, err = s.ListNotes(ctx(), store.ListNotesOptions{Query: "needle", Limit: 5})
+	if err != nil {
+		t.Fatalf("list query limit=5: %v", err)
+	}
+	if len(got) != 5 {
+		t.Errorf("explicit Limit=5 returned %d", len(got))
 	}
 }
 
@@ -198,7 +313,7 @@ func TestDeleteTask_OrphansNotesByDefault(t *testing.T) {
 	if err := s.DeleteTask(ctx(), task.ID, store.DeleteTaskOptions{}); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	all, _ := s.ListAllNotes(ctx())
+	all, _ := s.ListNotes(ctx(), store.ListNotesOptions{IncludeArchived: true})
 	if len(all) != 1 || all[0].ID != note.ID || all[0].TaskID != nil {
 		t.Errorf("expected note to be orphaned, got %+v", all)
 	}
@@ -212,7 +327,7 @@ func TestDeleteTask_DeleteNotesFlag(t *testing.T) {
 	if err := s.DeleteTask(ctx(), task.ID, store.DeleteTaskOptions{DeleteNotes: true}); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	all, _ := s.ListAllNotes(ctx())
+	all, _ := s.ListNotes(ctx(), store.ListNotesOptions{IncludeArchived: true})
 	if len(all) != 0 {
 		t.Errorf("expected notes hard-deleted, got %d", len(all))
 	}
@@ -229,7 +344,7 @@ func TestDeleteTask_RecursiveOrphansAllSubtreeNotes(t *testing.T) {
 	if err := s.DeleteTask(ctx(), parent.ID, store.DeleteTaskOptions{Recursive: true}); err != nil {
 		t.Fatalf("recursive delete: %v", err)
 	}
-	all, _ := s.ListAllNotes(ctx())
+	all, _ := s.ListNotes(ctx(), store.ListNotesOptions{IncludeArchived: true})
 	if len(all) != 2 {
 		t.Errorf("expected both notes to survive as standalone, got %d", len(all))
 	}
@@ -296,7 +411,7 @@ func TestDeleteTask_TransactionRollback_NoOrphanEvents(t *testing.T) {
 			t.Errorf("rollback should not emit %s; got %+v", e.Type, e)
 		}
 	}
-	all, _ := s.ListAllNotes(ctx())
+	all, _ := s.ListNotes(ctx(), store.ListNotesOptions{IncludeArchived: true})
 	if len(all) != 1 || all[0].TaskID == nil || *all[0].TaskID != child.ID {
 		t.Errorf("note should still belong to child after rollback, got %+v", all)
 	}

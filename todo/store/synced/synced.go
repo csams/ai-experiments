@@ -276,7 +276,7 @@ func (v *VectorSyncer) reembedTaskNotes(ctx context.Context, taskIDs []uint) err
 	var allNoteIDs []uint
 	for _, tid := range taskIDs {
 		t := tid
-		notes, err := v.store.ListNotes(ctx, &t)
+		notes, err := v.store.ListNotes(ctx, store.ListNotesOptions{TaskID: &t, IncludeArchived: true})
 		if err != nil {
 			continue
 		}
@@ -606,8 +606,9 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		taskTitle[t.ID] = t.Title
 	}
 
-	// Fetch all notes (attached + standalone).
-	allNotes, err := v.store.ListAllNotes(ctx)
+	// Fetch all notes (attached + standalone), including archived so reindex
+	// covers every note that may have a stale embedding.
+	allNotes, err := v.store.ListNotes(ctx, store.ListNotesOptions{Scope: store.NoteScopeAll, IncludeArchived: true})
 	if err != nil {
 		return fmt.Errorf("listing notes: %w", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/csams/todo/store"
 	"github.com/csams/todo/store/gormstore"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -76,7 +77,7 @@ func TestMigration_SQLite_DropsNotNullPreservesRows(t *testing.T) {
 	}
 
 	// Verify legacy data preserved with intact task_id.
-	all, err := s.ListAllNotes(context.Background())
+	all, err := s.ListNotes(context.Background(), store.ListNotesOptions{IncludeArchived: true})
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}

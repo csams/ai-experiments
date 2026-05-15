@@ -41,7 +41,7 @@ deploy/          # Systemd quadlet files and production config
 
 ## Key Interfaces
 
-- **`store.Store`** — 27-method interface for all task operations. Implemented by `gormstore.GormStore`.
+- **`store.Store`** — interface for all task operations. Implemented by `gormstore.GormStore`.
 - **`store.StoreObserver`** — receives `StoreEvent` after mutations. Used by `audit.Logger` and `synced.VectorSyncer`.
 - **`store.SemanticSearcher`** — vector similarity search. Implemented by `synced.VectorSyncer`.
 - **`embed.Embedder`** — generates vector embeddings. Implementations: `ollama.Embedder`, `openai.Embedder`.
@@ -74,13 +74,13 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (33 core + 2 optional semantic)
+### Available MCP Tools (31 core + 2 optional semantic)
 
 **Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
 
 `create_task` and `create_subtask` accept an optional `links` array. Each item is `{type, url, description}` (description optional). Inline links are inserted in the same transaction as the task, so any link-validation failure rolls the whole call back. Only one `task.created` event fires regardless of link count — the vector syncer re-embeds the task once with link descriptions included. Prefer inline `links` over per-link `add_link` calls when creating a task that already has its references in hand: it is atomic and avoids the per-link re-embed churn.
 
-**Notes:** `add_note`, `update_note`, `list_notes`, `list_all_notes`, `search_notes`, `delete_note`
+**Notes:** `add_note`, `update_note`, `list_notes`, `delete_note`
 
 **Links:** `add_link` (with optional `description`), `list_links`, `update_link`, `delete_link`
 
@@ -174,13 +174,19 @@ Tasks can be organized in parent-child trees. Use `set_parent` / `unparent`.
 Notes can either be attached to a task (`task_id` set) or standalone (`task_id` omitted). The model supports both at every layer:
 
 - **Create:** `add_note` accepts an optional `task_id`. Omit it for a standalone note.
-- **List:** `list_notes` with `task_id` returns that task's notes; without `task_id` returns standalone notes only. `list_all_notes` returns every note.
+- **List / search:** `list_notes` is the single query tool. Set `task_id` to restrict to that task's notes; otherwise `scope` selects breadth — `"all"` (attached + standalone, default), `"standalone"` (orphan notes), or `"attached"` (notes with a parent task). Optional `query` applies a case-insensitive substring filter on the note text. Archived notes are excluded unless `include_archived: true` is set.
 - **Update / reparent:** `update_note` operates by `note_id` alone. Provide any of `text`, `task_id` (reparent target), `clear_task_id: true` (detach to standalone), or `archived`. At least one must be provided.
 - **Delete:** `delete_note` takes only `note_id`.
 - **Archive:** standalone notes have their own `archived` flag (`note archive <id>` / `note unarchive <id>` from the CLI, or `update_note` with `archived: true|false` via MCP). Task-attached notes also have an `archived` column, but semantic search inherits archived state from the parent task while the note is attached — the per-note flag only takes effect after the note is detached (orphaned or explicitly cleared).
 - **Task deletion:** `delete_task` orphans a task's notes by default (sets `task_id=NULL`); their per-note `archived` flag (typically `false`) then governs them. Pass `delete_notes: true` to hard-delete them instead.
 
 **Migration callouts (breaking changes):**
+- `list_all_notes` and `search_notes` MCP tools are removed. Their behavior is folded into `list_notes` via the `scope` and `query` parameters. Migration:
+  - `list_all_notes()` → `list_notes()` (default scope is now `"all"`).
+  - `search_notes(query, task_id?, include_archived?)` → `list_notes({ query, task_id?, include_archived? })`. The 200-row default cap is preserved when `query` is set and no explicit `limit` is provided.
+  - `list_notes()` (no `task_id`) previously returned **standalone only**. It now returns **everything** by default. To get the old behavior, pass `scope: "standalone"`.
+  - At the Go store layer, `Store.ListNotes(taskID *uint)`, `Store.ListAllNotes()`, and `Store.SearchNotes(query, opts)` collapse to a single `Store.ListNotes(ctx, ListNotesOptions{TaskID, Scope, Query, IncludeArchived, Limit})`. `SearchNotesOptions` is removed.
+  - The unified `list_notes` excludes archived by default (matching the old `search_notes`). The previous list paths returned archived rows; callers that need them must pass `include_archived: true` (or `IncludeArchived: true` at the store layer). **This applies to the `task_id`-set path too:** `list_notes({ task_id: N })` previously returned that task's archived notes; it now excludes them.
 - `update_note` no longer takes `task_id` as a "find note in this task" parameter; `task_id` now means "reparent to this task." Clients that previously passed `task_id` plus `text` will silently move the note. Update such callers.
 - `delete_note` no longer takes `task_id` — only `note_id`.
 - The `notes.task_id` column is now nullable. The first run against an existing DB performs an automatic migration (Postgres: `DROP NOT NULL`; SQLite: 12-step ALTER table rebuild).

@@ -279,7 +279,7 @@ func TestNotes_CRUD(t *testing.T) {
 	}
 
 	// List
-	notes, err := s.ListNotes(ctx(), &task.ID)
+	notes, err := s.ListNotes(ctx(), store.ListNotesOptions{TaskID: &task.ID})
 	if err != nil {
 		t.Fatalf("list notes: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestNotes_CRUD(t *testing.T) {
 	if err := s.DeleteNote(ctx(), note.ID); err != nil {
 		t.Fatalf("delete note: %v", err)
 	}
-	notes, _ = s.ListNotes(ctx(), &task.ID)
+	notes, _ = s.ListNotes(ctx(), store.ListNotesOptions{TaskID: &task.ID})
 	if len(notes) != 0 {
 		t.Errorf("notes after delete = %d, want 0", len(notes))
 	}
@@ -560,22 +560,22 @@ func TestListTasks_Pagination(t *testing.T) {
 	}
 }
 
-func TestSearchNotes(t *testing.T) {
+func TestListNotes_Query(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	s.AddNote(ctx(), &task.ID, "checked auth token expiry")
 	s.AddNote(ctx(), &task.ID, "unrelated note")
 
-	results, err := s.SearchNotes(ctx(), "auth", store.SearchNotesOptions{})
+	results, err := s.ListNotes(ctx(), store.ListNotesOptions{Query: "auth"})
 	if err != nil {
-		t.Fatalf("search: %v", err)
+		t.Fatalf("list query: %v", err)
 	}
 	if len(results) != 1 {
 		t.Errorf("results = %d, want 1", len(results))
 	}
 }
 
-func TestSearchNotes_ExcludesArchivedByDefault(t *testing.T) {
+func TestListNotes_Query_ExcludesArchivedByDefault(t *testing.T) {
 	s := newTestStore(t)
 	live, _ := s.AddNote(ctx(), nil, "auth token rotation plan")
 	archived, _ := s.AddNote(ctx(), nil, "auth migration scratchpad")
@@ -583,24 +583,24 @@ func TestSearchNotes_ExcludesArchivedByDefault(t *testing.T) {
 		t.Fatalf("archive: %v", err)
 	}
 
-	results, err := s.SearchNotes(ctx(), "auth", store.SearchNotesOptions{})
+	results, err := s.ListNotes(ctx(), store.ListNotesOptions{Query: "auth"})
 	if err != nil {
-		t.Fatalf("search: %v", err)
+		t.Fatalf("list query: %v", err)
 	}
 	if len(results) != 1 || results[0].ID != live.ID {
 		t.Errorf("default search returned %d notes, want only the live one (id %d)", len(results), live.ID)
 	}
 
-	all, err := s.SearchNotes(ctx(), "auth", store.SearchNotesOptions{IncludeArchived: true})
+	all, err := s.ListNotes(ctx(), store.ListNotesOptions{Query: "auth", IncludeArchived: true})
 	if err != nil {
-		t.Fatalf("search include_archived: %v", err)
+		t.Fatalf("list query include_archived: %v", err)
 	}
 	if len(all) != 2 {
 		t.Errorf("include_archived returned %d notes, want 2", len(all))
 	}
 }
 
-func TestSearchNotes_TaskIDFilter(t *testing.T) {
+func TestListNotes_QueryWithTaskIDFilter(t *testing.T) {
 	s := newTestStore(t)
 	taskA, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
 	taskB, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
@@ -608,9 +608,9 @@ func TestSearchNotes_TaskIDFilter(t *testing.T) {
 	s.AddNote(ctx(), &taskB.ID, "auth notes for B")
 	s.AddNote(ctx(), nil, "auth standalone")
 
-	results, err := s.SearchNotes(ctx(), "auth", store.SearchNotesOptions{TaskID: &taskA.ID})
+	results, err := s.ListNotes(ctx(), store.ListNotesOptions{Query: "auth", TaskID: &taskA.ID})
 	if err != nil {
-		t.Fatalf("search: %v", err)
+		t.Fatalf("list query: %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("results = %d, want 1", len(results))

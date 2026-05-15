@@ -76,44 +76,31 @@ func registerNoteTools(srv *server.MCPServer, s store.Store) {
 	})
 
 	srv.AddTool(mcpgo.NewTool("list_notes",
-		mcpgo.WithDescription("List notes. With task_id: that task's notes. Without task_id: standalone notes (no parent task)."),
-		mcpgo.WithNumber("task_id", mcpgo.Description("Optional task ID. Omit to list standalone notes only."), mcpgo.Min(1)),
-	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		taskID := getOptUint(req, "task_id")
-		notes, err := s.ListNotes(ctx, taskID)
-		if err != nil {
-			return errResult(err), nil
-		}
-		return textResult(toJSON(notes)), nil
-	})
-
-	srv.AddTool(mcpgo.NewTool("list_all_notes",
-		mcpgo.WithDescription("List every note in the system (attached + standalone)."),
-	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		notes, err := s.ListAllNotes(ctx)
-		if err != nil {
-			return errResult(err), nil
-		}
-		return textResult(toJSON(notes)), nil
-	})
-
-	srv.AddTool(mcpgo.NewTool("search_notes",
-		mcpgo.WithDescription("Case-insensitive substring search across note text. "+
-			"Use this for exact keyword/substring lookups in note bodies (a name, codename, distinctive word). "+
-			"For conceptual lookups, use semantic_search."),
-		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Search query (max 500 chars)"), mcpgo.MaxLength(500)),
-		mcpgo.WithNumber("task_id", mcpgo.Description("Restrict to notes attached to this task"), mcpgo.Min(1)),
+		mcpgo.WithDescription("List notes. Set task_id to restrict to that task's notes. "+
+			"Otherwise scope selects breadth: \"all\" (attached + standalone, default), \"standalone\" (orphan notes), or \"attached\" (notes with a parent task). "+
+			"Optional case-insensitive substring filter via query. "+
+			"Archived notes are excluded by default."),
+		mcpgo.WithNumber("task_id", mcpgo.Description("Restrict to this task's notes. Scope is ignored when set."), mcpgo.Min(1)),
+		mcpgo.WithString("scope", mcpgo.Description("Applied when task_id is omitted. Default \"all\"."), mcpgo.Enum("all", "standalone", "attached")),
+		mcpgo.WithString("query", mcpgo.Description("Optional case-insensitive substring filter on note text (max 500 chars)"), mcpgo.MaxLength(500)),
 		mcpgo.WithBoolean("include_archived", mcpgo.Description("Include archived notes (default false)")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		query, err := requireStr(req, "query")
-		if err != nil {
-			return errResult(err), nil
+		opts := store.ListNotesOptions{
+			TaskID:          getOptUint(req, "task_id"),
+			Query:           getStr(req, "query"),
+			IncludeArchived: getBool(req, "include_archived"),
 		}
-		opts := store.SearchNotesOptions{IncludeArchived: getBool(req, "include_archived")}
-		if tid := getUint(req, "task_id"); tid > 0 {
-			opts.TaskID = &tid
+		switch getStr(req, "scope") {
+		case "", "all":
+			opts.Scope = store.NoteScopeAll
+		case "standalone":
+			opts.Scope = store.NoteScopeStandalone
+		case "attached":
+			opts.Scope = store.NoteScopeAttached
+		default:
+			return errResult(fmt.Errorf("scope must be one of \"all\", \"standalone\", \"attached\"")), nil
 		}
-		notes, err := s.SearchNotes(ctx, query, opts)
+		notes, err := s.ListNotes(ctx, opts)
 		if err != nil {
 			return errResult(err), nil
 		}

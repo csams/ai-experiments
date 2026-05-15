@@ -28,7 +28,6 @@ type Store interface {
 	ArchiveTask(ctx context.Context, id uint, archived bool) error
 	DeleteTask(ctx context.Context, id uint, opts DeleteTaskOptions) error
 	SearchTasks(ctx context.Context, query string) ([]model.Task, error)
-	SearchNotes(ctx context.Context, query string, opts SearchNotesOptions) ([]model.Note, error)
 
 	// Bulk operations (max 100 IDs per call)
 	BulkUpdateState(ctx context.Context, ids []uint, state model.TaskState) ([]model.Task, error)
@@ -54,8 +53,7 @@ type Store interface {
 	// Notes — taskID nil means standalone (no parent task).
 	AddNote(ctx context.Context, taskID *uint, text string) (*model.Note, error)
 	UpdateNote(ctx context.Context, noteID uint, opts UpdateNoteOptions) (*model.Note, error)
-	ListNotes(ctx context.Context, taskID *uint) ([]model.Note, error) // nil = standalone-only
-	ListAllNotes(ctx context.Context) ([]model.Note, error)
+	ListNotes(ctx context.Context, opts ListNotesOptions) ([]model.Note, error)
 	GetNotesByIDs(ctx context.Context, ids []uint) ([]model.Note, error)
 	DeleteNote(ctx context.Context, noteID uint) error
 	ArchiveNote(ctx context.Context, noteID uint, archived bool) error
@@ -132,11 +130,34 @@ type SetCheckpointOptions struct {
 	OpenThreads string
 }
 
-// SearchNotesOptions controls SearchNotes filtering. Zero value excludes
-// archived notes and matches across all notes (attached and standalone).
-type SearchNotesOptions struct {
-	IncludeArchived bool
-	TaskID          *uint // nil = all notes; non-nil = only notes attached to this task
+// NoteScope selects which notes ListNotes returns when TaskID is nil.
+// The zero value (NoteScopeAll) returns attached + standalone notes.
+type NoteScope string
+
+const (
+	NoteScopeAll        NoteScope = ""           // attached + standalone (default)
+	NoteScopeStandalone NoteScope = "standalone" // only orphan notes (task_id IS NULL)
+	NoteScopeAttached   NoteScope = "attached"   // only notes with a parent task (task_id IS NOT NULL)
+)
+
+// ListNotesOptions controls ListNotes filtering. The zero value returns all
+// notes (attached + standalone), excluding archived, ordered by created_at ASC.
+//
+// When TaskID is non-nil, Scope is ignored — results are scoped to that
+// task's notes. When TaskID is nil, Scope selects the breadth of results.
+//
+// Query, if non-empty, applies a case-insensitive substring filter on the
+// note text. It composes (AND) with the scope and archive filters.
+//
+// Limit caps the result count. Zero means no explicit cap — except when
+// Query is non-empty, in which case the store applies a default cap to
+// preserve the old SearchNotes behavior.
+type ListNotesOptions struct {
+	TaskID          *uint     // restrict to this task's notes
+	Scope           NoteScope // applied only when TaskID is nil
+	Query           string    // optional case-insensitive substring filter on text (max 500 chars)
+	IncludeArchived bool      // default false
+	Limit           int       // 0 = no cap (or store default when Query is set); >0 = cap
 }
 
 // UpdateLinkOptions holds optional fields for updating a link.

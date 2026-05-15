@@ -114,7 +114,7 @@ var noteUpdateCmd = &cobra.Command{
 
 var noteListCmd = &cobra.Command{
 	Use:   "list [task-id]",
-	Short: "List notes (no args: all; --standalone: only standalone; <task-id>: that task's notes)",
+	Short: "List notes (no args: all; --standalone: only standalone; <task-id>: that task's notes). Archived notes are excluded unless --include-archived is set.",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, _, err := openStore()
@@ -125,38 +125,29 @@ var noteListCmd = &cobra.Command{
 
 		all, _ := cmd.Flags().GetBool("all")
 		standalone, _ := cmd.Flags().GetBool("standalone")
+		includeArchived, _ := cmd.Flags().GetBool("include-archived")
 
+		opts := store.ListNotesOptions{IncludeArchived: includeArchived}
 		switch {
 		case len(args) == 1:
 			taskID, err := parseTaskID(args[0])
 			if err != nil {
 				return err
 			}
-			notes, err := s.ListNotes(cmd.Context(), &taskID)
-			if err != nil {
-				return err
-			}
-			outputNotes(notes)
+			opts.TaskID = &taskID
 		case standalone:
-			notes, err := s.ListNotes(cmd.Context(), nil)
-			if err != nil {
-				return err
-			}
-			outputNotes(notes)
+			opts.Scope = store.NoteScopeStandalone
 		case all:
-			notes, err := s.ListAllNotes(cmd.Context())
-			if err != nil {
-				return err
-			}
-			outputNotes(notes)
+			opts.Scope = store.NoteScopeAll
 		default:
 			// No positional, no flag: list everything (least surprising default).
-			notes, err := s.ListAllNotes(cmd.Context())
-			if err != nil {
-				return err
-			}
-			outputNotes(notes)
+			opts.Scope = store.NoteScopeAll
 		}
+		notes, err := s.ListNotes(cmd.Context(), opts)
+		if err != nil {
+			return err
+		}
+		outputNotes(notes)
 		return nil
 	},
 }
@@ -242,7 +233,10 @@ var noteSearchCmd = &cobra.Command{
 		defer s.Close(cmd.Context())
 
 		includeArchived, _ := cmd.Flags().GetBool("include-archived")
-		notes, err := s.SearchNotes(cmd.Context(), args[0], store.SearchNotesOptions{IncludeArchived: includeArchived})
+		notes, err := s.ListNotes(cmd.Context(), store.ListNotesOptions{
+			Query:           args[0],
+			IncludeArchived: includeArchived,
+		})
 		if err != nil {
 			return err
 		}
@@ -263,6 +257,7 @@ func init() {
 
 	noteListCmd.Flags().Bool("all", false, "list every note (attached + standalone)")
 	noteListCmd.Flags().Bool("standalone", false, "list only standalone notes")
+	noteListCmd.Flags().Bool("include-archived", false, "include archived notes in results (default: false)")
 
 	noteSearchCmd.Flags().Bool("include-archived", false, "include archived notes in results (default: false)")
 
