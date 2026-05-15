@@ -73,15 +73,22 @@ HTTP streamable transport (for remote / multi-client access).`,
 				handler.ServeHTTP(w, r)
 			})
 
+			// Bound the request body before any downstream handler reads it.
+			// mcp-go's streamable HTTP handler does io.ReadAll(r.Body) without
+			// its own cap, so an unbounded body would force unbounded buffering.
+			capped := bodySizeLimitMiddleware(cfg.MCP.MaxBodyBytes, inner)
+
 			if cfg.MCP.APIKey != "" {
-				mux.Handle("/mcp", bearerAuthMiddleware(cfg.MCP.APIKey, inner))
+				mux.Handle("/mcp", bearerAuthMiddleware(cfg.MCP.APIKey, capped))
 			} else {
-				mux.Handle("/mcp", inner)
+				mux.Handle("/mcp", capped)
 			}
 
 			opts = append(opts, server.WithStreamableHTTPServer(&http.Server{
 				Handler:           mux,
 				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       cfg.MCP.ReadTimeout,
+				WriteTimeout:      cfg.MCP.WriteTimeout,
 				IdleTimeout:       120 * time.Second,
 				MaxHeaderBytes:    1 << 20, // 1MB
 			}))
@@ -111,6 +118,20 @@ HTTP streamable transport (for remote / multi-client access).`,
 			return server.ServeStdio(mcpServer)
 		}
 	},
+}
+
+// bodySizeLimitMiddleware caps the request body to maxBytes. A maxBytes <= 0
+// disables the cap (matches the http.Server convention of "0 = unlimited").
+// When the limit is exceeded, downstream io.ReadAll returns *http.MaxBytesError,
+// which the mcp-go handler surfaces as a JSON-RPC parse error to the client.
+func bodySizeLimitMiddleware(maxBytes int64, next http.Handler) http.Handler {
+	if maxBytes <= 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func bearerAuthMiddleware(apiKey string, next http.Handler) http.Handler {

@@ -29,3 +29,7 @@ mcp:
   api_key: ""    # injected via TODO_MCP_API_KEY env var; do NOT put keys here
   tls_cert: /etc/todo/certs/mcp/server.crt
   tls_key: /etc/todo/certs/mcp/server.key
+  # HTTP transport hardening. Defaults applied when omitted.
+  max_body_bytes: 8388608   # 8 MiB request body cap; 0 disables
+  read_timeout: 30s         # full request read (headers + body); 0 disables
+  write_timeout: 0s         # 0 leaves SSE streams uncapped; set only if you know you don't need streaming

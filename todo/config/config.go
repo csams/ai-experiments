@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -119,6 +120,25 @@ type MCPConfig struct {
 	APIKey    string `yaml:"api_key" mapstructure:"api_key" json:"-"`
 	TLSCert   string `yaml:"tls_cert" mapstructure:"tls_cert"`
 	TLSKey    string `yaml:"tls_key" mapstructure:"tls_key"`
+
+	// HTTP transport hardening knobs. All apply only when Transport == "http".
+
+	// MaxBodyBytes caps the request body size in bytes. 0 disables the cap (not
+	// recommended on a public-facing server — an unauthenticated or malicious
+	// client can otherwise force unbounded buffering via io.ReadAll on the
+	// MCP request body). Default 8 MiB.
+	MaxBodyBytes int64 `yaml:"max_body_bytes" mapstructure:"max_body_bytes"`
+
+	// ReadTimeout bounds the full request read (headers + body). 0 disables.
+	// Default 30s — generous for sane JSON-RPC requests; bounds Slowloris-style
+	// trickle-body attacks. ReadHeaderTimeout is held at 10s independently.
+	ReadTimeout time.Duration `yaml:"read_timeout" mapstructure:"read_timeout"`
+
+	// WriteTimeout bounds the full response write. 0 disables — that is the
+	// default because the MCP streamable-HTTP transport keeps SSE streams
+	// open across multi-second tool calls and a tight WriteTimeout would cut
+	// them off mid-flight. Set explicitly only if you understand the trade.
+	WriteTimeout time.Duration `yaml:"write_timeout" mapstructure:"write_timeout"`
 }
 
 // Load reads config from a YAML file, environment variables, and applies defaults.
@@ -149,6 +169,9 @@ func Load(configPath string) (*Config, error) {
 
 	v.SetDefault("mcp.transport", "stdio")
 	v.SetDefault("mcp.addr", ":8080")
+	v.SetDefault("mcp.max_body_bytes", 8*1024*1024) // 8 MiB
+	v.SetDefault("mcp.read_timeout", "30s")
+	v.SetDefault("mcp.write_timeout", "0s") // disabled: SSE streams must not be capped
 
 	// Config file
 	if configPath != "" {
