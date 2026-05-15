@@ -1153,7 +1153,7 @@ func (s *GormStore) UpdateTask(ctx context.Context, id uint, opts store.UpdateTa
 	return &task, nil
 }
 
-func (s *GormStore) SetTaskState(ctx context.Context, id uint, state model.TaskState) (*model.Task, error) {
+func (s *GormStore) SetTaskState(ctx context.Context, id uint, state model.TaskState, opts store.SetTaskStateOptions) (*model.Task, error) {
 	if err := validateID(id); err != nil {
 		return nil, err
 	}
@@ -1181,41 +1181,11 @@ func (s *GormStore) SetTaskState(ctx context.Context, id uint, state model.TaskS
 
 		oldState = task.State
 
-		// Clear blocker entries for this task
-		if err := tx.Where("task_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
+		extra, err := s.applyStateTransitionBlockerSideEffects(tx, id, oldState, state, opts.ForceClearBlockers)
+		if err != nil {
 			return err
 		}
-
-		// If Done: remove this task from other tasks' blockers and auto-unblock
-		if state == model.StateDone {
-			// Find tasks blocked by this one
-			var blockedTaskIDs []uint
-			if err := tx.Model(&model.TaskBlocker{}).
-				Where("blocker_id = ?", id).
-				Pluck("task_id", &blockedTaskIDs).Error; err != nil {
-				return err
-			}
-
-			// Remove this task as a blocker
-			if err := tx.Where("blocker_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
-				return err
-			}
-
-			// Auto-unblock tasks with zero remaining blockers
-			for _, btid := range blockedTaskIDs {
-				var count int64
-				if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", btid).Count(&count).Error; err != nil {
-					return err
-				}
-				if count == 0 {
-					if err := tx.Model(&model.Task{}).Where("id = ? AND state = ?", btid, model.StateBlocked).
-						Update("state", model.StateUnblocked).Error; err != nil {
-						return err
-					}
-					affectedIDs = append(affectedIDs, btid)
-				}
-			}
-		}
+		affectedIDs = append(affectedIDs, extra...)
 
 		task.State = state
 		if err := tx.Model(&task).Update("state", state).Error; err != nil {
@@ -1238,6 +1208,88 @@ func (s *GormStore) SetTaskState(ctx context.Context, id uint, state model.TaskS
 		return nil, fmt.Errorf("reload task %d: %w", id, err)
 	}
 	return &task, nil
+}
+
+// applyStateTransitionBlockerSideEffects centralizes the blocker bookkeeping
+// for SetTaskState and BulkUpdateState. It runs inside the surrounding
+// transaction and returns any IDs that were auto-unblocked as a side effect
+// (so the caller can include them in the emitted event).
+//
+// Callers must pass `oldState` freshly fetched within the same transaction —
+// the per-task loop in BulkUpdateState relies on this so an earlier Done in
+// the batch that auto-Unblocked a later target is observed correctly.
+//
+// Rules:
+//   - state == Done: clear blockers blocking this task; clear this task as
+//     a blocker of others; auto-Unblocked any dependents whose blocker
+//     count hits zero. (Done is terminal — blocker rows on a Done task are
+//     meaningless and the existing CLI/MCP "complete this task" path
+//     should not require an extra flag to drop them.)
+//   - state != Done && oldState == Blocked: outstanding blocker rows are
+//     preserved by default; the call returns ErrInvalidState. With
+//     force=true the rows are cleared.
+//   - state != Done && oldState != Blocked: no-op on the blocker tables.
+//     Invariant elsewhere: blocker rows exist iff oldState == Blocked, so
+//     there is nothing to do.
+func (s *GormStore) applyStateTransitionBlockerSideEffects(tx *gorm.DB, id uint, oldState, state model.TaskState, force bool) ([]uint, error) {
+	if state == model.StateDone {
+		// Clear blockers blocking this task.
+		if err := tx.Where("task_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
+			return nil, err
+		}
+		// Find dependents (tasks this one blocks) and remove this task as
+		// their blocker. Then auto-unblock those that have zero remaining.
+		var blockedTaskIDs []uint
+		if err := tx.Model(&model.TaskBlocker{}).
+			Where("blocker_id = ?", id).
+			Pluck("task_id", &blockedTaskIDs).Error; err != nil {
+			return nil, err
+		}
+		if err := tx.Where("blocker_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
+			return nil, err
+		}
+		var autoUnblocked []uint
+		for _, btid := range blockedTaskIDs {
+			var count int64
+			if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", btid).Count(&count).Error; err != nil {
+				return nil, err
+			}
+			if count == 0 {
+				if err := tx.Model(&model.Task{}).Where("id = ? AND state = ?", btid, model.StateBlocked).
+					Update("state", model.StateUnblocked).Error; err != nil {
+					return nil, err
+				}
+				autoUnblocked = append(autoUnblocked, btid)
+			}
+		}
+		return autoUnblocked, nil
+	}
+
+	if oldState != model.StateBlocked {
+		// Non-Done from non-Blocked: nothing to do.
+		return nil, nil
+	}
+
+	// Non-Done from Blocked: preserve unless force is set.
+	var blockerCount int64
+	if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", id).Count(&blockerCount).Error; err != nil {
+		return nil, err
+	}
+	if blockerCount == 0 {
+		// Defensive: state says Blocked but no rows. Allow the transition;
+		// nothing to clear.
+		return nil, nil
+	}
+	if !force {
+		// Hint at the option name in a surface-agnostic way: the CLI exposes
+		// it as --force-clear-blockers, the MCP tool as force_clear_blockers.
+		return nil, fmt.Errorf("task %d has %d blocker(s); remove them first or override (--force-clear-blockers / force_clear_blockers=true): %w",
+			id, blockerCount, model.ErrInvalidState)
+	}
+	if err := tx.Where("task_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 func (s *GormStore) AddBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error) {
@@ -1775,7 +1827,7 @@ func (s *GormStore) SearchTasks(ctx context.Context, query string) ([]model.Task
 
 // --- Bulk operations ---
 
-func (s *GormStore) BulkUpdateState(ctx context.Context, ids []uint, state model.TaskState) ([]model.Task, error) {
+func (s *GormStore) BulkUpdateState(ctx context.Context, ids []uint, state model.TaskState, opts store.SetTaskStateOptions) ([]model.Task, error) {
 	if len(ids) > maxBulkIDs {
 		return nil, &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
 	}
@@ -1809,34 +1861,11 @@ func (s *GormStore) BulkUpdateState(ctx context.Context, ids []uint, state model
 				return fmt.Errorf("task %d: %w", id, model.ErrArchived)
 			}
 
-			// Clear blockers
-			if err := tx.Where("task_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
+			extra, err := s.applyStateTransitionBlockerSideEffects(tx, id, task.State, state, opts.ForceClearBlockers)
+			if err != nil {
 				return err
 			}
-
-			// Done cascade
-			if state == model.StateDone {
-				var blockedTaskIDs []uint
-				if err := tx.Model(&model.TaskBlocker{}).Where("blocker_id = ?", id).Pluck("task_id", &blockedTaskIDs).Error; err != nil {
-					return err
-				}
-				if err := tx.Where("blocker_id = ?", id).Delete(&model.TaskBlocker{}).Error; err != nil {
-					return err
-				}
-				for _, btid := range blockedTaskIDs {
-					var count int64
-					if err := tx.Model(&model.TaskBlocker{}).Where("task_id = ?", btid).Count(&count).Error; err != nil {
-						return err
-					}
-					if count == 0 {
-						if err := tx.Model(&model.Task{}).Where("id = ? AND state = ?", btid, model.StateBlocked).
-							Update("state", model.StateUnblocked).Error; err != nil {
-							return err
-						}
-						affectedIDs = append(affectedIDs, btid)
-					}
-				}
-			}
+			affectedIDs = append(affectedIDs, extra...)
 
 			if err := tx.Model(&task).Update("state", state).Error; err != nil {
 				return err

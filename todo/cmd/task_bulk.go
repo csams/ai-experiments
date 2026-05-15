@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/csams/todo/store"
 	"github.com/spf13/cobra"
 )
 
@@ -32,7 +33,10 @@ var taskBulkStateCmd = &cobra.Command{
 			return err
 		}
 
-		tasks, err := s.BulkUpdateState(cmd.Context(), ids, state)
+		force, _ := cmd.Flags().GetBool("force-clear-blockers")
+		tasks, err := s.BulkUpdateState(cmd.Context(), ids, state, store.SetTaskStateOptions{
+			ForceClearBlockers: force,
+		})
 		if err != nil {
 			return err
 		}
@@ -161,6 +165,8 @@ func parseIDList(args []string) ([]uint, error) {
 
 func init() {
 	taskBulkStateCmd.Flags().String("state", "", "target state (required)")
+	taskBulkStateCmd.Flags().Bool("force-clear-blockers", false,
+		"drop outstanding blocker rows when transitioning Blocked tasks to a non-Done state")
 	taskBulkPriorityCmd.Flags().Int("priority", 0, "target priority (required)")
 	taskBulkAddTagsCmd.Flags().String("tags", "", "comma-separated tags to add (required)")
 	taskBulkRemoveTagsCmd.Flags().String("tags", "", "comma-separated tags to remove (required)")

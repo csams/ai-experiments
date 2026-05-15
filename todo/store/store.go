@@ -21,7 +21,15 @@ type Store interface {
 	GetTasks(ctx context.Context, ids []uint, opts GetTaskOptions) (BatchGetTasksResult, error)
 	ListTasks(ctx context.Context, opts ListTasksOptions) ([]model.TaskListItem, error)
 	UpdateTask(ctx context.Context, id uint, opts UpdateTaskOptions) (*model.Task, error)
-	SetTaskState(ctx context.Context, id uint, state model.TaskState) (*model.Task, error) // non-Blocked only; Blocked returns ErrInvalidState
+	// SetTaskState transitions a task's state. Cannot set Blocked directly
+	// (returns ErrInvalidState — use UpdateBlockers/AddBlockers). When the
+	// task is currently Blocked and the target is anything other than Done,
+	// outstanding blocker rows are preserved by default and the call returns
+	// ErrInvalidState; pass SetTaskStateOptions.ForceClearBlockers=true to
+	// drop the blockers as part of the transition. Done is terminal and
+	// always clears blocker rows (in both directions) and auto-unblocks
+	// dependents whose blocker counts hit zero.
+	SetTaskState(ctx context.Context, id uint, state model.TaskState, opts SetTaskStateOptions) (*model.Task, error)
 	AddBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error)
 	RemoveBlockers(ctx context.Context, taskID uint, blockerIDs []uint) (*model.Task, error)
 	UpdateBlockers(ctx context.Context, taskID uint, add, remove []uint) (*model.Task, error) // combined add+remove in one txn; at least one of add/remove must be non-empty
@@ -31,7 +39,11 @@ type Store interface {
 	SearchTasks(ctx context.Context, query string) ([]model.Task, error)
 
 	// Bulk operations (max 100 IDs per call)
-	BulkUpdateState(ctx context.Context, ids []uint, state model.TaskState) ([]model.Task, error)
+	// BulkUpdateState applies the same SetTaskState semantics across the array
+	// in one transaction (see SetTaskState for the blocker-handling rules,
+	// including ForceClearBlockers). A single rejected task aborts the whole
+	// batch — no partial commit.
+	BulkUpdateState(ctx context.Context, ids []uint, state model.TaskState, opts SetTaskStateOptions) ([]model.Task, error)
 	BulkUpdatePriority(ctx context.Context, ids []uint, priority int) ([]model.Task, error)
 	BulkAddTags(ctx context.Context, ids []uint, tags []string) error
 	BulkRemoveTags(ctx context.Context, ids []uint, tags []string) error
@@ -93,6 +105,23 @@ type CreateTaskOptions struct {
 	Tags        []string
 	Links       []model.LinkInput
 	ParentID    *uint // nil = top-level; non-nil = subtask under this parent
+}
+
+// SetTaskStateOptions controls SetTaskState / BulkUpdateState side effects.
+//
+// ForceClearBlockers, when true, permits transitioning a Blocked task to a
+// non-Done state by deleting its outstanding task_blockers rows as part of
+// the transaction. Without the flag, such a transition is rejected with
+// ErrInvalidState so callers do not silently lose dependency information.
+//
+// The flag has no effect when:
+//   - The target state is Done — Done is terminal and always clears the
+//     task's blocker rows (and removes the task from other tasks' blockers,
+//     auto-unblocking dependents).
+//   - The task is not currently Blocked — there are no blocker rows to
+//     preserve, so the flag is a no-op.
+type SetTaskStateOptions struct {
+	ForceClearBlockers bool
 }
 
 // UpdateTaskOptions holds optional fields for updating a task.

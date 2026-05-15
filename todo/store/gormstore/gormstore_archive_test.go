@@ -94,7 +94,7 @@ func TestUnarchive_CleansUpInvalidBlockers(t *testing.T) {
 	s.ArchiveTask(ctx(), a.ID, true)
 
 	// Complete B while A is archived
-	s.SetTaskState(ctx(), b.ID, model.StateDone)
+	s.SetTaskState(ctx(), b.ID, model.StateDone, store.SetTaskStateOptions{})
 
 	// Unarchive A — should clean up the stale blocker (B is Done)
 	if err := s.ArchiveTask(ctx(), a.ID, false); err != nil {

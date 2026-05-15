@@ -94,7 +94,7 @@ func TestValidation_BulkMaxIDs(t *testing.T) {
 	for i := range ids {
 		ids[i] = uint(i + 1)
 	}
-	_, err := s.BulkUpdateState(ctx(), ids, model.StateProgressing)
+	_, err := s.BulkUpdateState(ctx(), ids, model.StateProgressing, store.SetTaskStateOptions{})
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("expected ValidationError for >100 IDs, got %v", err)

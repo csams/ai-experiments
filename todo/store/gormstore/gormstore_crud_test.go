@@ -183,7 +183,7 @@ func TestListTasks_FilterByState(t *testing.T) {
 	s := newTestStore(t)
 	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "New task"})
 	task2, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Progressing"})
-	s.SetTaskState(ctx(), task2.ID, model.StateProgressing)
+	s.SetTaskState(ctx(), task2.ID, model.StateProgressing, store.SetTaskStateOptions{})
 
 	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{States: []model.TaskState{model.StateProgressing}})
 	if err != nil {
@@ -198,9 +198,9 @@ func TestListTasks_FilterByMultipleStates(t *testing.T) {
 	s := newTestStore(t)
 	newTask, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "New task"})
 	progressingTask, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Progressing"})
-	s.SetTaskState(ctx(), progressingTask.ID, model.StateProgressing)
+	s.SetTaskState(ctx(), progressingTask.ID, model.StateProgressing, store.SetTaskStateOptions{})
 	doneTask, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Done"})
-	s.SetTaskState(ctx(), doneTask.ID, model.StateDone)
+	s.SetTaskState(ctx(), doneTask.ID, model.StateDone, store.SetTaskStateOptions{})
 
 	tasks, err := s.ListTasks(ctx(), store.ListTasksOptions{
 		States: []model.TaskState{model.StateNew, model.StateProgressing},
@@ -672,7 +672,7 @@ func TestListTasks_Query_ComposesWithFilters(t *testing.T) {
 	hit, _ := s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &parent.ID, Title: "Wire foo into bar", Tags: []string{"work"}})
 	s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &parent.ID, Title: "Wire baz into qux", Tags: []string{"work"}})       // wrong query
 	s.CreateTask(ctx(), store.CreateTaskOptions{ParentID: &parent.ID, Title: "Wire foo elsewhere", Tags: []string{"work", "x"}}) // tag set wrong
-	if _, err := s.SetTaskState(ctx(), hit.ID, model.StateProgressing); err != nil {
+	if _, err := s.SetTaskState(ctx(), hit.ID, model.StateProgressing, store.SetTaskStateOptions{}); err != nil {
 		t.Fatalf("set state: %v", err)
 	}
 

@@ -317,10 +317,17 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 	srv.AddTool(mcpgo.NewTool("set_task_state",
 		mcpgo.WithDescription("Set the state of one or more tasks (1..100 IDs). Atomic across the entire array; "+
 			"processes tasks in ascending ID order. Cannot set Blocked directly — use update_blockers instead. "+
-			"Setting Done auto-unblocks dependents whose blockers are all complete. "+
+			"Setting Done is terminal: it always clears the task's blocker rows and auto-unblocks dependents whose "+
+			"remaining blockers all complete. "+
+			"Transitioning a Blocked task to any non-Done state is rejected by default to prevent silent loss of "+
+			"dependency information; pass force_clear_blockers=true to drop the outstanding blockers as part of "+
+			"the transition. A single rejected task aborts the whole batch. "+
 			"Returns updated tasks. Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("Task IDs (max 100)"), mcpgo.WithNumberItems(mcpgo.Min(1)), mcpgo.MaxItems(100)),
 		mcpgo.WithString("state", mcpgo.Required(), mcpgo.Description("Target state"), mcpgo.Enum("New", "Progressing", "Unblocked", "Done")),
+		mcpgo.WithBoolean("force_clear_blockers", mcpgo.Description(
+			"When true, allow transitioning a Blocked task to a non-Done state by dropping its outstanding blocker rows. "+
+				"Has no effect for Done transitions (terminal) or for tasks that are not currently Blocked.")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		ids, err := requireUintSlice(req, "ids")
 		if err != nil {
@@ -333,7 +340,9 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if err != nil {
 			return errResult(err), nil
 		}
-		tasks, err := s.BulkUpdateState(ctx, ids, state)
+		tasks, err := s.BulkUpdateState(ctx, ids, state, store.SetTaskStateOptions{
+			ForceClearBlockers: getBool(req, "force_clear_blockers"),
+		})
 		if err != nil {
 			return errResult(err), nil
 		}

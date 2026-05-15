@@ -158,6 +158,15 @@ A task can be `Blocked` (via `update_blockers` with an `add` list) or `Unblocked
 - Use `update_blockers` (with `add` and/or `remove` arrays) to manage Blocked state. Both lists can be supplied in one call to swap blockers atomically.
 - Setting Done auto-unblocks dependents with no remaining blockers.
 
+**Migration callout (breaking change — `set_task_state` blocker preservation):**
+Transitioning a Blocked task to any non-Done state (e.g. `Progressing`, `New`, or explicitly `Unblocked`) now requires the caller to opt into dropping the outstanding blocker rows. Previously the rows were silently deleted on every state change, which masked dependency loss.
+
+- MCP: pass `force_clear_blockers: true` on `set_task_state` to drop blockers as part of the transition. Without it, the call returns an error wrapping `ErrInvalidState` and the task's state and blocker rows are unchanged.
+- CLI: `todo task state <id> <state> --force-clear-blockers` and `todo task bulk-state --force-clear-blockers`.
+- Done is still terminal — Done transitions always clear the task's blocker rows and auto-unblock dependents, no flag required.
+- Non-Blocked tasks are unaffected (there are no blocker rows to preserve).
+- Store interface change: `Store.SetTaskState` and `Store.BulkUpdateState` now take a `store.SetTaskStateOptions{ForceClearBlockers}` argument. The CLI commands above route through it.
+
 ## Priority
 
 Lower number = higher importance. P0 > P1 > P2. Negative priorities are valid.

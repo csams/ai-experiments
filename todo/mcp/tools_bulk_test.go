@@ -115,6 +115,66 @@ func TestSetTaskState_RejectsBlocked(t *testing.T) {
 	}
 }
 
+// TestSetTaskState_BlockedToProgressingRejectedByDefault — exercises PR-1's
+// new behavior at the MCP boundary: transitioning a Blocked task to
+// Progressing without force_clear_blockers must return an error, and the
+// blocker rows must remain on disk.
+func TestSetTaskState_BlockedToProgressingRejectedByDefault(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	ctx := context.Background()
+	a, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "B"})
+	if _, err := s.AddBlockers(ctx, b.ID, []uint{a.ID}); err != nil {
+		t.Fatalf("setup AddBlockers: %v", err)
+	}
+
+	res := callTool(t, c, "set_task_state", map[string]any{
+		"ids":   []any{float64(b.ID)},
+		"state": "Progressing",
+	})
+	if !res.IsError {
+		t.Fatalf("expected rejection without force_clear_blockers; got: %s", resultText(t, res))
+	}
+
+	detail, _ := s.GetTask(ctx, b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	if detail.State != model.StateBlocked {
+		t.Errorf("state = %q, want Blocked (rejection should not change state)", detail.State)
+	}
+	if len(detail.Blockers) != 1 {
+		t.Errorf("blockers = %d, want 1 (rejection must preserve dependency rows)", len(detail.Blockers))
+	}
+}
+
+// TestSetTaskState_BlockedToProgressingWithForce — same setup but with
+// force_clear_blockers=true; expect a successful transition and the
+// blocker rows cleared.
+func TestSetTaskState_BlockedToProgressingWithForce(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	ctx := context.Background()
+	a, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "B"})
+	if _, err := s.AddBlockers(ctx, b.ID, []uint{a.ID}); err != nil {
+		t.Fatalf("setup AddBlockers: %v", err)
+	}
+
+	res := callTool(t, c, "set_task_state", map[string]any{
+		"ids":                  []any{float64(b.ID)},
+		"state":                "Progressing",
+		"force_clear_blockers": true,
+	})
+	if res.IsError {
+		t.Fatalf("expected success with force; got: %s", resultText(t, res))
+	}
+
+	detail, _ := s.GetTask(ctx, b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	if detail.State != model.StateProgressing {
+		t.Errorf("state = %q, want Progressing", detail.State)
+	}
+	if len(detail.Blockers) != 0 {
+		t.Errorf("blockers = %d, want 0 (force should clear)", len(detail.Blockers))
+	}
+}
+
 func TestSetTaskPriority_ArrayHappyPath(t *testing.T) {
 	c, s := newMCPTestClient(t)
 	ctx := context.Background()

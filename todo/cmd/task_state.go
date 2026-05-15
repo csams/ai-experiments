@@ -3,13 +3,22 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/csams/todo/store"
 	"github.com/spf13/cobra"
 )
 
 var taskStateCmd = &cobra.Command{
 	Use:   "state <id> <state>",
 	Short: "Set a task's state (New, Progressing, Unblocked, Done)",
-	Args:  cobra.ExactArgs(2),
+	Long: `Set a task's state.
+
+Done is terminal and always clears the task's blocker rows
+(auto-unblocking dependents whose blocker counts hit zero).
+Transitioning a Blocked task to a non-Done state is rejected
+by default to prevent silent loss of dependency information;
+pass --force-clear-blockers to drop the blockers as part of
+the transition.`,
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, _, err := openStore()
 		if err != nil {
@@ -27,7 +36,10 @@ var taskStateCmd = &cobra.Command{
 			return err
 		}
 
-		task, err := s.SetTaskState(cmd.Context(), id, state)
+		force, _ := cmd.Flags().GetBool("force-clear-blockers")
+		task, err := s.SetTaskState(cmd.Context(), id, state, store.SetTaskStateOptions{
+			ForceClearBlockers: force,
+		})
 		if err != nil {
 			return err
 		}
@@ -41,5 +53,7 @@ var taskStateCmd = &cobra.Command{
 }
 
 func init() {
+	taskStateCmd.Flags().Bool("force-clear-blockers", false,
+		"drop outstanding blocker rows when transitioning a Blocked task to a non-Done state")
 	taskCmd.AddCommand(taskStateCmd)
 }

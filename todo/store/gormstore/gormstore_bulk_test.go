@@ -16,7 +16,7 @@ func TestBulkUpdateState_Done(t *testing.T) {
 	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task A"})
 	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task B"})
 
-	results, err := s.BulkUpdateState(ctx(), []uint{a.ID, b.ID}, model.StateDone)
+	results, err := s.BulkUpdateState(ctx(), []uint{a.ID, b.ID}, model.StateDone, store.SetTaskStateOptions{})
 	if err != nil {
 		t.Fatalf("bulk update state: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestBulkUpdateState_DoneCascadeUnblocks(t *testing.T) {
 	s.AddBlockers(ctx(), blocked.ID, []uint{blocker.ID})
 
 	// Complete the blocker via bulk
-	_, err := s.BulkUpdateState(ctx(), []uint{blocker.ID}, model.StateDone)
+	_, err := s.BulkUpdateState(ctx(), []uint{blocker.ID}, model.StateDone, store.SetTaskStateOptions{})
 	if err != nil {
 		t.Fatalf("bulk update state: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestBulkUpdateState_RejectsBlocked(t *testing.T) {
 	s := newTestStore(t)
 	s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
-	_, err := s.BulkUpdateState(ctx(), []uint{1}, model.StateBlocked)
+	_, err := s.BulkUpdateState(ctx(), []uint{1}, model.StateBlocked, store.SetTaskStateOptions{})
 	if !errors.Is(err, model.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState, got %v", err)
 	}
@@ -63,7 +63,7 @@ func TestBulkUpdateState_RejectsArchived(t *testing.T) {
 	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	s.ArchiveTask(ctx(), task.ID, true)
 
-	_, err := s.BulkUpdateState(ctx(), []uint{task.ID}, model.StateDone)
+	_, err := s.BulkUpdateState(ctx(), []uint{task.ID}, model.StateDone, store.SetTaskStateOptions{})
 	if !errors.Is(err, model.ErrArchived) {
 		t.Errorf("expected ErrArchived, got %v", err)
 	}
@@ -72,7 +72,7 @@ func TestBulkUpdateState_RejectsArchived(t *testing.T) {
 func TestBulkUpdateState_RejectsNotFound(t *testing.T) {
 	s := newTestStore(t)
 
-	_, err := s.BulkUpdateState(ctx(), []uint{999}, model.StateDone)
+	_, err := s.BulkUpdateState(ctx(), []uint{999}, model.StateDone, store.SetTaskStateOptions{})
 	if !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -85,13 +85,69 @@ func TestBulkUpdateState_RejectsExceedsLimit(t *testing.T) {
 	for i := range ids {
 		ids[i] = uint(i + 1)
 	}
-	_, err := s.BulkUpdateState(ctx(), ids, model.StateDone)
+	_, err := s.BulkUpdateState(ctx(), ids, model.StateDone, store.SetTaskStateOptions{})
 	if err == nil {
 		t.Fatal("expected error for exceeding bulk limit")
 	}
 	var ve *model.ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("expected ValidationError, got %T: %v", err, err)
+	}
+}
+
+// TestBulkUpdateState_RejectsBlockedToProgressingByDefault — mirror of the
+// singular-path test in gormstore_state_test.go, but for the bulk path
+// (which is the path MCP set_task_state actually takes).
+func TestBulkUpdateState_RejectsBlockedToProgressingByDefault(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
+
+	_, err := s.BulkUpdateState(ctx(), []uint{b.ID}, model.StateProgressing, store.SetTaskStateOptions{})
+	if !errors.Is(err, model.ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState, got %v", err)
+	}
+
+	detail, _ := s.GetTask(ctx(), b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	if detail.State != model.StateBlocked {
+		t.Errorf("state = %q, want Blocked (rejection should leave state untouched)", detail.State)
+	}
+	if len(detail.Blockers) != 1 {
+		t.Errorf("blockers = %d, want 1 (rejection must preserve dependency rows)", len(detail.Blockers))
+	}
+}
+
+// TestBulkUpdateState_ForceClearBlockersAtomicAcrossArray — when force is
+// passed, the cleared rows are committed alongside the rest of the batch.
+// Confirms the side-effect path runs inside the same transaction.
+func TestBulkUpdateState_ForceClearBlockersAtomicAcrossArray(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b1, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B1"})
+	b2, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B2"})
+	s.AddBlockers(ctx(), b1.ID, []uint{a.ID})
+	s.AddBlockers(ctx(), b2.ID, []uint{a.ID})
+
+	results, err := s.BulkUpdateState(ctx(), []uint{b1.ID, b2.ID}, model.StateProgressing,
+		store.SetTaskStateOptions{ForceClearBlockers: true})
+	if err != nil {
+		t.Fatalf("bulk update with force: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %d, want 2", len(results))
+	}
+	for _, r := range results {
+		if r.State != model.StateProgressing {
+			t.Errorf("task %d: state = %q, want Progressing", r.ID, r.State)
+		}
+	}
+
+	for _, id := range []uint{b1.ID, b2.ID} {
+		detail, _ := s.GetTask(ctx(), id, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+		if len(detail.Blockers) != 0 {
+			t.Errorf("task %d: blockers = %d, want 0 (force should clear)", id, len(detail.Blockers))
+		}
 	}
 }
 

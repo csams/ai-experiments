@@ -12,7 +12,7 @@ func TestSetTaskState_Progressing(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
-	updated, err := s.SetTaskState(ctx(), task.ID, model.StateProgressing)
+	updated, err := s.SetTaskState(ctx(), task.ID, model.StateProgressing, store.SetTaskStateOptions{})
 	if err != nil {
 		t.Fatalf("set state: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestSetTaskState_BlockedReturnsError(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 
-	_, err := s.SetTaskState(ctx(), task.ID, model.StateBlocked)
+	_, err := s.SetTaskState(ctx(), task.ID, model.StateBlocked, store.SetTaskStateOptions{})
 	if !errors.Is(err, model.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState, got %v", err)
 	}
@@ -36,27 +36,97 @@ func TestSetTaskState_ArchivedReturnsError(t *testing.T) {
 	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Task"})
 	s.ArchiveTask(ctx(), task.ID, true)
 
-	_, err := s.SetTaskState(ctx(), task.ID, model.StateProgressing)
+	_, err := s.SetTaskState(ctx(), task.ID, model.StateProgressing, store.SetTaskStateOptions{})
 	if !errors.Is(err, model.ErrArchived) {
 		t.Errorf("expected ErrArchived, got %v", err)
 	}
 }
 
-func TestSetTaskState_ClearsBlockerEntries(t *testing.T) {
+// TestSetTaskState_RejectsBlockedToProgressingByDefault pins the
+// pre-PR-1-removed footgun: a Blocked task transitioning to a non-Done
+// state used to silently delete its blocker rows. The new default is to
+// reject the call so callers don't lose dependency information by
+// accident.
+func TestSetTaskState_RejectsBlockedToProgressingByDefault(t *testing.T) {
 	s := newTestStore(t)
 	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
 	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 
-	// Manually set B to Progressing — should clear its blocker entries
-	_, err := s.SetTaskState(ctx(), b.ID, model.StateProgressing)
+	_, err := s.SetTaskState(ctx(), b.ID, model.StateProgressing, store.SetTaskStateOptions{})
+	if !errors.Is(err, model.ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState, got %v", err)
+	}
+
+	// Blocker row must still be present after the rejected call.
+	detail, _ := s.GetTask(ctx(), b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	if detail.State != model.StateBlocked {
+		t.Errorf("state = %q, want Blocked (rejection should not change state)", detail.State)
+	}
+	if len(detail.Blockers) != 1 {
+		t.Errorf("blockers = %d, want 1 (rejection must preserve dependency rows)", len(detail.Blockers))
+	}
+}
+
+// TestSetTaskState_ForceClearsBlockersOnNonDoneTransition is the opt-in
+// path: with ForceClearBlockers=true the caller explicitly accepts the
+// data loss and the call proceeds.
+func TestSetTaskState_ForceClearsBlockersOnNonDoneTransition(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
+
+	updated, err := s.SetTaskState(ctx(), b.ID, model.StateProgressing,
+		store.SetTaskStateOptions{ForceClearBlockers: true})
 	if err != nil {
-		t.Fatalf("set state: %v", err)
+		t.Fatalf("set state with force: %v", err)
+	}
+	if updated.State != model.StateProgressing {
+		t.Errorf("state = %q, want Progressing", updated.State)
 	}
 
 	detail, _ := s.GetTask(ctx(), b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if len(detail.Blockers) != 0 {
-		t.Errorf("blockers after state change = %d, want 0", len(detail.Blockers))
+		t.Errorf("blockers after forced clear = %d, want 0", len(detail.Blockers))
+	}
+}
+
+// TestSetTaskState_DoneClearsBlockersUnconditionally — Done is terminal
+// and clearing blocker rows on the way out is expected behavior, not a
+// hidden side effect. force is not required.
+func TestSetTaskState_DoneClearsBlockersUnconditionally(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
+
+	updated, err := s.SetTaskState(ctx(), b.ID, model.StateDone, store.SetTaskStateOptions{})
+	if err != nil {
+		t.Fatalf("set done: %v", err)
+	}
+	if updated.State != model.StateDone {
+		t.Errorf("state = %q, want Done", updated.State)
+	}
+
+	detail, _ := s.GetTask(ctx(), b.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
+	if len(detail.Blockers) != 0 {
+		t.Errorf("blockers after Done = %d, want 0", len(detail.Blockers))
+	}
+}
+
+// TestSetTaskState_NonBlockedTransitionLeavesNoSideEffect — a New or
+// Progressing task transitioning between non-Done states never touches
+// the blocker tables (there shouldn't be any rows to touch).
+func TestSetTaskState_NonBlockedTransitionLeavesNoSideEffect(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+
+	if _, err := s.SetTaskState(ctx(), a.ID, model.StateProgressing, store.SetTaskStateOptions{}); err != nil {
+		t.Fatalf("New -> Progressing: %v", err)
+	}
+	if _, err := s.SetTaskState(ctx(), a.ID, model.StateNew, store.SetTaskStateOptions{}); err != nil {
+		t.Fatalf("Progressing -> New: %v", err)
 	}
 }
 
@@ -67,7 +137,7 @@ func TestSetTaskState_DoneCascadeUnblocks(t *testing.T) {
 	s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 
 	// Complete A — should unblock B
-	_, err := s.SetTaskState(ctx(), a.ID, model.StateDone)
+	_, err := s.SetTaskState(ctx(), a.ID, model.StateDone, store.SetTaskStateOptions{})
 	if err != nil {
 		t.Fatalf("set done: %v", err)
 	}
@@ -107,7 +177,7 @@ func TestAddBlockers_MultipleBlockers(t *testing.T) {
 	s.AddBlockers(ctx(), c.ID, []uint{a.ID, b.ID})
 
 	// Complete A — C should still be Blocked (B still blocks it)
-	s.SetTaskState(ctx(), a.ID, model.StateDone)
+	s.SetTaskState(ctx(), a.ID, model.StateDone, store.SetTaskStateOptions{})
 
 	detail, _ := s.GetTask(ctx(), c.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.State != model.StateBlocked {
@@ -115,7 +185,7 @@ func TestAddBlockers_MultipleBlockers(t *testing.T) {
 	}
 
 	// Complete B — C should now be Unblocked
-	s.SetTaskState(ctx(), b.ID, model.StateDone)
+	s.SetTaskState(ctx(), b.ID, model.StateDone, store.SetTaskStateOptions{})
 
 	detail, _ = s.GetTask(ctx(), c.ID, store.GetTaskOptions{Include: model.AllTaskIncludesSet()})
 	if detail.State != model.StateUnblocked {
@@ -137,7 +207,7 @@ func TestAddBlockers_BlockByDone(t *testing.T) {
 	s := newTestStore(t)
 	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
 	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
-	s.SetTaskState(ctx(), a.ID, model.StateDone)
+	s.SetTaskState(ctx(), a.ID, model.StateDone, store.SetTaskStateOptions{})
 
 	_, err := s.AddBlockers(ctx(), b.ID, []uint{a.ID})
 	if err == nil {
@@ -327,7 +397,7 @@ func TestUpdateBlockers_ArchivedTargetRejected(t *testing.T) {
 func TestUpdateBlockers_DoneBlockerRejected(t *testing.T) {
 	s := newTestStore(t)
 	done, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "done"})
-	if _, err := s.SetTaskState(ctx(), done.ID, model.StateDone); err != nil {
+	if _, err := s.SetTaskState(ctx(), done.ID, model.StateDone, store.SetTaskStateOptions{}); err != nil {
 		t.Fatalf("set done: %v", err)
 	}
 	target, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
