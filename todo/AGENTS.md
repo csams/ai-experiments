@@ -74,11 +74,11 @@ Add to your MCP settings:
 }
 ```
 
-### Available MCP Tools (31 core + 2 optional semantic)
+### Available MCP Tools (28 core + 2 optional semantic)
 
-**Tasks:** `create_task`, `create_subtask`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `archive_task`, `unarchive_task`, `delete_task`, `set_parent`, `unparent`
+**Tasks:** `create_task`, `list_tasks`, `get_task`, `get_tasks`, `update_task`, `set_task_state`, `add_blockers`, `remove_blockers`, `set_task_archived`, `delete_task`, `set_parent`
 
-`create_task` and `create_subtask` accept an optional `links` array. Each item is `{type, url, description}` (description optional). Inline links are inserted in the same transaction as the task, so any link-validation failure rolls the whole call back. Only one `task.created` event fires regardless of link count — the vector syncer re-embeds the task once with link descriptions included. Prefer inline `links` over per-link `add_link` calls when creating a task that already has its references in hand: it is atomic and avoids the per-link re-embed churn.
+`create_task` accepts an optional `parent_id` (omit for top-level, set to create a subtask under an existing non-archived parent) and an optional `links` array. Each link item is `{type, url, description}` (description optional). Inline links are inserted in the same transaction as the task, so any link-validation failure rolls the whole call back. Only one `task.created` event fires regardless of link count — the vector syncer re-embeds the task once with link descriptions included. Prefer inline `links` over per-link `add_link` calls when creating a task that already has its references in hand: it is atomic and avoids the per-link re-embed churn. `create_task` returns full task detail by default; pass an `include` array to restrict expensive fields.
 
 **Notes:** `add_note`, `update_note`, `list_notes`, `delete_note`
 
@@ -163,11 +163,16 @@ Blockers are automatically promoted to at least match the priority of tasks they
 
 ## Subtask Hierarchy
 
-Tasks can be organized in parent-child trees. Use `set_parent` / `unparent`.
+Tasks can be organized in parent-child trees. Use `set_parent` (omit `parent_id` to make a task top-level) or pass `parent_id` to `create_task` at creation time.
 
 - `list_tasks` shows top-level by default. Use `include_subtasks: true` or `parent_id` filter.
 - Deleting a parent promotes children. Use `recursive: true` to delete the entire subtree.
 - Archiving always cascades to the subtask tree.
+
+**Migration callouts (breaking changes):**
+- `create_subtask` is removed. Use `create_task` with `parent_id` to create a subtask. The unified `create_task` now returns full task detail by default (the old `create_task` returned only the bare task); pass `include` to restrict expensive fields.
+- `unparent` is removed. Use `set_parent` with `parent_id` omitted to make a task top-level.
+- `archive_task` and `unarchive_task` are replaced by `set_task_archived(ids: number[], archived: boolean)`. The new tool accepts an array of IDs (max 100, must be non-empty) and returns full detail for every task processed. Each task is still archived atomically (subtree cascade preserved); cross-task atomicity is not guaranteed — a failure aborts at that point with the prefix already committed. On error, callers should re-query archived state to determine which IDs were processed.
 
 ## Notes
 

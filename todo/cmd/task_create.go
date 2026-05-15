@@ -41,6 +41,13 @@ var taskCreateCmd = &cobra.Command{
 			return err
 		}
 
+		parentFlag, _ := cmd.Flags().GetUint("parent")
+		var parentID *uint
+		if parentFlag > 0 {
+			p := parentFlag
+			parentID = &p
+		}
+
 		task, err := s.CreateTask(cmd.Context(), store.CreateTaskOptions{
 			Title:       title,
 			Description: desc,
@@ -48,6 +55,7 @@ var taskCreateCmd = &cobra.Command{
 			DueAt:       dueAt,
 			Tags:        tags,
 			Links:       links,
+			ParentID:    parentID,
 		})
 		if err != nil {
 			return err
@@ -113,6 +121,7 @@ func init() {
 	taskCreateCmd.Flags().IntP("priority", "p", 0, "priority (lower = more important)")
 	taskCreateCmd.Flags().String("due", "", "due date (YYYY-MM-DD)")
 	taskCreateCmd.Flags().StringSlice("tag", nil, "tags (repeatable)")
+	taskCreateCmd.Flags().Uint("parent", 0, "create as a subtask of this parent task ID")
 	taskCreateCmd.Flags().StringArray("link", nil,
 		"attach a link (repeatable). Format: type=<jira|pr|url>,url=<URL>[,desc=<text>]. "+
 			"Comma-in-description is not supported; use the link add subcommand afterward for that case.")
