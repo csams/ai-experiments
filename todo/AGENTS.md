@@ -86,6 +86,8 @@ Add to your MCP settings:
 
 **Links:** `add_link` (with optional `description`), `list_links`, `update_link`, `delete_link`
 
+**Migration callout (breaking change — `update_link` empty-string handling):** `update_link` now rejects an explicit `"type": ""` or `"url": ""` with an error. Previously the handler treated those as "leave the field unchanged" (a silent no-op that masked the store's actual refusal to clear them). Callers that meant "don't touch this field" should omit the key entirely; `description: ""` continues to explicitly clear the description (the one clearable field).
+
 **Checkpoints:** `set_checkpoint`, `get_checkpoint`, `delete_checkpoint`
 
 **Tags:** `add_tags`, `remove_tags` — both accept `ids` (array, 1..100) and `tags`. Atomic across the whole array.

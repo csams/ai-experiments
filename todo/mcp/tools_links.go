@@ -54,7 +54,10 @@ func registerLinkTools(srv *server.MCPServer, s store.Store) {
 	})
 
 	srv.AddTool(mcpgo.NewTool("update_link",
-		mcpgo.WithDescription("Update a link's type, url, and/or description. Omit a field to leave it unchanged. Pass description=\"\" to clear it; url and type cannot be cleared."),
+		mcpgo.WithDescription("Update a link's type, url, and/or description. "+
+			"Omit a field to leave it unchanged. "+
+			"`description: \"\"` explicitly clears the description. "+
+			"`type` and `url` cannot be cleared; passing an explicit empty string for either is rejected (callers that previously sent `\"\"` to mean \"don't change\" should now omit the key entirely)."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithNumber("link_id", mcpgo.Required(), mcpgo.Description("Link ID"), mcpgo.Min(1)),
 		mcpgo.WithString("type", mcpgo.Description("New link type"), mcpgo.Enum("jira", "pr", "url")),
@@ -70,15 +73,25 @@ func registerLinkTools(srv *server.MCPServer, s store.Store) {
 			return errResult(err), nil
 		}
 		opts := store.UpdateLinkOptions{}
-		// type and url cannot be cleared, so treat empty-string as "not supplied".
-		if t := getOptStr(req, "type"); t != nil && *t != "" {
+		// `type` and `url` cannot be cleared by passing an empty
+		// string. Distinguish "key absent" (leave the field alone)
+		// from "key present and empty" (reject) so a caller that
+		// accidentally sends "" doesn't silently no-op.
+		if t := getOptStr(req, "type"); t != nil {
+			if *t == "" {
+				return errResult(fmt.Errorf("type cannot be cleared; omit the key to leave it unchanged")), nil
+			}
 			lt := model.LinkType(*t)
 			opts.Type = &lt
 		}
-		if u := getOptStr(req, "url"); u != nil && *u != "" {
+		if u := getOptStr(req, "url"); u != nil {
+			if *u == "" {
+				return errResult(fmt.Errorf("url cannot be cleared; omit the key to leave it unchanged")), nil
+			}
 			opts.URL = u
 		}
-		// description is the only clearable field: empty string explicitly clears it.
+		// description IS clearable: an explicit empty string clears it,
+		// an absent key leaves it alone.
 		opts.Description = getOptStr(req, "description")
 		link, err := s.UpdateLink(ctx, taskID, linkID, opts)
 		if err != nil {
