@@ -246,7 +246,16 @@ type ListNotesOptions struct {
 	Scope           NoteScope // applied only when TaskID is nil
 	Query           string    // optional case-insensitive substring filter on text (max 500 chars)
 	IncludeArchived bool      // default false
-	Limit           int       // 0 = no cap (or store default when Query is set); >0 = cap
+
+	// Limit caps the result count. 0 falls back to the store's
+	// defaultQueryLimit (200); explicit Limit values are clamped at
+	// maxQueryLimit (1000). Page beyond the cap via Offset rather
+	// than asking for an unbounded result set.
+	Limit int
+
+	// Offset skips this many leading rows before returning Limit rows.
+	// Combined with Limit for pagination through large result sets.
+	Offset int
 }
 
 // UpdateLinkOptions holds optional fields for updating a link.
@@ -268,8 +277,12 @@ type ListTasksOptions struct {
 	Tags            []string          // AND logic: task must have all specified tags
 	Overdue         bool              // only tasks past due date
 	SortBy          string            // "priority" (default), "due", "created", "updated"
-	Limit           int
-	Offset          int
+
+	// Limit caps the result count. 0 falls back to the store's
+	// defaultQueryLimit (200); explicit Limit values are clamped at
+	// maxQueryLimit (1000). Page beyond the cap via Offset.
+	Limit  int
+	Offset int
 
 	// Due date filters
 	HasDueDate *bool      // true = has due date, false = no due date set

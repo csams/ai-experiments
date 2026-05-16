@@ -84,6 +84,8 @@ Add to your MCP settings:
 
 **Notes:** `add_note`, `update_note`, `list_notes`, `delete_note`
 
+**Migration callout (breaking change — `list_notes` default limit):** `Store.ListNotes` now applies the same per-call cap policy as `Store.ListTasks`: `Limit=0` falls back to the store's `defaultQueryLimit` (200); explicit values are clamped at `maxQueryLimit` (1000). Previously `ListNotes` was unbounded when `Query` was unset, capped at 200 only when a query was supplied — the asymmetry let an accidental "load everything" call materialize an unbounded result. To page beyond the cap, the new `ListNotesOptions.Offset` field is the supported route. The vector-sync `Reindex` path internally paginates so a database with > 200 notes still gets fully reindexed. CLI/MCP callers that relied on the pre-PR-19 unbounded `list_notes` behavior should narrow the query (use `task_id` / `--standalone` / `--attached`) or page via `Limit`+`Offset` at the store-API level.
+
 **Links:** `add_link` (with optional `description`), `list_links`, `update_link`, `delete_link`
 
 **Migration callout (breaking change — `update_link` empty-string handling):** `update_link` now rejects an explicit `"type": ""` or `"url": ""` with an error. Previously the handler treated those as "leave the field unchanged" (a silent no-op that masked the store's actual refusal to clear them). Callers that meant "don't touch this field" should omit the key entirely; `description: ""` continues to explicitly clear the description (the one clearable field).

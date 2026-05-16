@@ -401,7 +401,20 @@ func (v *VectorSyncer) embedNotes(ctx context.Context, noteIDs []uint) error {
 	return nil
 }
 
-// reembedTaskNotes re-embeds all notes for the given tasks, updating their metadata.
+// reembedTaskNotes re-embeds all notes for the given tasks, updating
+// their metadata.
+//
+// Note: the per-task ListNotes call here is implicitly capped at
+// defaultQueryLimit (200) after PR-19's policy unification. A single
+// task with > 200 notes would have its tail notes skipped during this
+// post-archive metadata refresh. The cap is acceptable because:
+//   - It's vanishingly rare for one task to carry hundreds of notes.
+//   - The failure mode is "stale metadata on tail notes," not data
+//     loss; the next per-note mutation re-embeds with current metadata.
+//   - The operator escape hatch (`todo vector reindex`) covers it.
+//
+// If a real workload runs into the cap, page this loop via Limit/Offset
+// the same way loadAllNotes does.
 func (v *VectorSyncer) reembedTaskNotes(ctx context.Context, taskIDs []uint) error {
 	var allNoteIDs []uint
 	for _, tid := range taskIDs {
@@ -846,13 +859,11 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		}
 	}
 
-	// Fetch all tasks. Reindex embeds description + tags + links into chunks,
-	// so opt description and links in here. Tags are always loaded by ListTasks.
-	tasks, err := v.store.ListTasks(ctx, store.ListTasksOptions{
-		IncludeArchived: true,
-		IncludeSubtasks: true,
-		Include:         map[string]bool{"description": true, "links": true},
-	})
+	// Fetch all tasks. Reindex embeds description + tags + links into
+	// chunks, so opt description and links in here. Tags are always
+	// loaded by ListTasks. Paginate so a DB with > maxQueryLimit rows
+	// reindexes completely (a single ListTasks call is capped).
+	tasks, err := loadAllTasks(ctx, v.store)
 	if err != nil {
 		return fmt.Errorf("listing tasks: %w", err)
 	}
@@ -867,9 +878,10 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 		taskTitle[t.ID] = t.Title
 	}
 
-	// Fetch all notes (attached + standalone), including archived so reindex
-	// covers every note that may have a stale embedding.
-	allNotes, err := v.store.ListNotes(ctx, store.ListNotesOptions{Scope: store.NoteScopeAll, IncludeArchived: true})
+	// Fetch all notes (attached + standalone), including archived so
+	// reindex covers every note that may have a stale embedding. Same
+	// pagination pattern as tasks.
+	allNotes, err := loadAllNotes(ctx, v.store)
 	if err != nil {
 		return fmt.Errorf("listing notes: %w", err)
 	}
@@ -1022,6 +1034,72 @@ func (v *VectorSyncer) Reindex(ctx context.Context, clear bool, progressFn func(
 	}
 
 	return nil
+}
+
+// reindexPageSize is the per-call Limit used to paginate ListTasks /
+// ListNotes during Reindex. Matched to the store's maxQueryLimit so the
+// number of round-trips stays small for large indexes while still
+// honoring the per-call cap.
+const reindexPageSize = 1000
+
+// loadAllTasks paginates through ListTasks to gather every task,
+// regardless of how many rows live in the database. Returns the
+// accumulated slice; callers in this package build per-task lookup
+// maps from it.
+func loadAllTasks(ctx context.Context, s store.Store) ([]model.TaskListItem, error) {
+	var all []model.TaskListItem
+	offset := 0
+	for {
+		page, err := s.ListTasks(ctx, store.ListTasksOptions{
+			IncludeArchived: true,
+			IncludeSubtasks: true,
+			Include:         map[string]bool{"description": true, "links": true},
+			Limit:           reindexPageSize,
+			Offset:          offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		all = append(all, page...)
+		offset += len(page)
+		// Short page means the source ran out; no need to issue
+		// another query just to confirm zero.
+		if len(page) < reindexPageSize {
+			break
+		}
+	}
+	return all, nil
+}
+
+// loadAllNotes paginates through ListNotes for the reindex path.
+// Identical shape to loadAllTasks; the two helpers stay separate
+// because their Option types are distinct.
+func loadAllNotes(ctx context.Context, s store.Store) ([]model.Note, error) {
+	var all []model.Note
+	offset := 0
+	for {
+		page, err := s.ListNotes(ctx, store.ListNotesOptions{
+			Scope:           store.NoteScopeAll,
+			IncludeArchived: true,
+			Limit:           reindexPageSize,
+			Offset:          offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		all = append(all, page...)
+		offset += len(page)
+		if len(page) < reindexPageSize {
+			break
+		}
+	}
+	return all, nil
 }
 
 // Compile-time interface checks.

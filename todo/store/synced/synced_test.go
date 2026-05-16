@@ -653,6 +653,52 @@ func TestReindex(t *testing.T) {
 	}
 }
 
+// TestReindex_PaginatesPastDefaultCap pins the PR-19 invariant: Reindex
+// must surface every task and note in the relational store, not just
+// the first defaultQueryLimit (200). Pre-PR-19 the ListNotes call was
+// unbounded so this worked accidentally; after PR-19 ListNotes caps at
+// 200 by default and Reindex pages via Offset to recover full coverage.
+func TestReindex_PaginatesPastDefaultCap(t *testing.T) {
+	s, _, vs, syncer := newTestSetup(t)
+
+	const want = 220 // > 200 = the default cap on a single ListNotes call
+	taskIDs := make([]uint, 0, want)
+	for i := 0; i < want; i++ {
+		task, err := s.CreateTask(bg(), store.CreateTaskOptions{Title: "T"})
+		if err != nil {
+			t.Fatalf("seed task %d: %v", i, err)
+		}
+		taskIDs = append(taskIDs, task.ID)
+		if _, err := s.AddNote(bg(), &task.ID, "n"); err != nil {
+			t.Fatalf("seed note %d: %v", i, err)
+		}
+	}
+
+	// Clear vector store so only Reindex populates it.
+	vs.mu.Lock()
+	vs.docs = make(map[string]vectorstore.Document)
+	vs.mu.Unlock()
+
+	if err := syncer.Reindex(bg(), false, nil); err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+
+	// Spot-check the LAST task and note — if Reindex stopped at the
+	// default cap, the tail items would be missing.
+	last := taskIDs[len(taskIDs)-1]
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	if got := vs.findTaskChunks(last); len(got) == 0 {
+		t.Errorf("task %d (past default cap) missing chunks; pagination didn't reach it", last)
+	}
+	// Note IDs are auto-incremented in CreateTask/AddNote order; the
+	// last note's ID equals `want` since we created one per task and
+	// nothing else seeded notes.
+	if got := vs.findNoteChunks(uint(want)); len(got) == 0 {
+		t.Errorf("note %d (past default cap) missing chunks; pagination didn't reach it", want)
+	}
+}
+
 func TestReindex_WithClear(t *testing.T) {
 	s, _, vs, syncer := newTestSetup(t)
 

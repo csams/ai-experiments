@@ -20,7 +20,19 @@ import (
 )
 
 const maxBulkIDs = 100
+
+// defaultQueryLimit is the per-call cap applied to ListTasks /
+// ListNotes when the caller doesn't supply Limit. Picked to be small
+// enough that an accidental "load everything" call doesn't pull the
+// whole database into memory, large enough that the default response
+// is useful in a single page.
 const defaultQueryLimit = 200
+
+// maxQueryLimit clamps explicit Limit values — a caller that asks for
+// 100k rows still gets at most 1000. Pagination via Offset is the
+// supported way to fetch beyond this; internal callers (e.g. the
+// vector reindexer) page in chunks of maxQueryLimit.
+const maxQueryLimit = 1000
 
 var tagRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
@@ -1116,10 +1128,16 @@ func (s *GormStore) ListTasks(ctx context.Context, opts store.ListTasksOptions) 
 		q = q.Order("priority ASC, created_at DESC")
 	}
 
-	// Pagination
+	// Pagination — see defaultQueryLimit / maxQueryLimit for the
+	// caps. Limit=0 means "use the default"; an explicit Limit larger
+	// than maxQueryLimit is clamped (a caller wanting more pages
+	// should paginate via Offset).
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = defaultQueryLimit
+	}
+	if limit > maxQueryLimit {
+		limit = maxQueryLimit
 	}
 	q = q.Limit(limit)
 	if opts.Offset > 0 {
@@ -2609,14 +2627,22 @@ func (s *GormStore) ListNotes(ctx context.Context, opts store.ListNotesOptions) 
 		q = q.Where("LOWER(text) LIKE ? ESCAPE '\\'", pattern)
 	}
 
+	// Pagination — same shape as ListTasks. Limit=0 falls back to the
+	// default cap; explicit Limit is clamped at maxQueryLimit; Offset
+	// supports paging through larger result sets. Prior behavior was
+	// asymmetric (capped only when Query was set, unbounded otherwise);
+	// the symmetry now matches ListTasks and prevents an accidental
+	// "load all notes" from materializing megabytes into memory.
 	limit := opts.Limit
-	if limit == 0 && opts.Query != "" {
-		// Preserve the prior SearchNotes default cap so a common substring
-		// across many notes doesn't quietly return an unbounded result set.
+	if limit <= 0 {
 		limit = defaultQueryLimit
 	}
-	if limit > 0 {
-		q = q.Limit(limit)
+	if limit > maxQueryLimit {
+		limit = maxQueryLimit
+	}
+	q = q.Limit(limit)
+	if opts.Offset > 0 {
+		q = q.Offset(opts.Offset)
 	}
 
 	var notes []model.Note
