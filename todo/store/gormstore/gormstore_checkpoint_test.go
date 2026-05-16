@@ -331,6 +331,96 @@ func TestCheckpoint_NoOpUpdateSkipsEvent(t *testing.T) {
 	}
 }
 
+// TestCheckpoint_TaskIDUniqueConstraintInSchema is the schema-guard
+// test SetCheckpoint's race-safety comment points at. The upsert path
+// (INSERT-then-fall-through-to-UPDATE-on-duplicate) is only safe if the
+// underlying schema actually enforces uniqueness on checkpoints.task_id.
+// If a future migration drops the constraint, two concurrent
+// SetCheckpoint calls would both INSERT, producing duplicate rows and
+// breaking the singleton-per-task contract.
+//
+// The check is SQLite-specific (the project's test harness uses
+// in-memory SQLite). It introspects PRAGMA index_list to verify some
+// unique index exists that covers exactly the task_id column. The
+// Postgres path uses the same `uniqueIndex` GORM tag and would be
+// asserted the same way against information_schema if a Postgres
+// integration test ever lands.
+func TestCheckpoint_TaskIDUniqueConstraintInSchema(t *testing.T) {
+	s := newTestStore(t)
+	// Force the checkpoints table to exist so AutoMigrate has run.
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	if _, err := s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{
+		Recap: "r", NextSteps: "n",
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	type indexRow struct {
+		Seq     int    `gorm:"column:seq"`
+		Name    string `gorm:"column:name"`
+		Unique  int    `gorm:"column:unique"`
+		Origin  string `gorm:"column:origin"`
+		Partial int    `gorm:"column:partial"`
+	}
+	type indexCol struct {
+		SeqNo int    `gorm:"column:seqno"`
+		CID   int    `gorm:"column:cid"`
+		Name  string `gorm:"column:name"`
+	}
+
+	// Find unique indexes on the checkpoints table.
+	var indexes []indexRow
+	if err := s.DB().Raw("PRAGMA index_list(checkpoints)").Scan(&indexes).Error; err != nil {
+		t.Fatalf("index_list: %v", err)
+	}
+
+	var found bool
+	for _, idx := range indexes {
+		if idx.Unique != 1 {
+			continue
+		}
+		var cols []indexCol
+		if err := s.DB().Raw("PRAGMA index_info(" + idx.Name + ")").Scan(&cols).Error; err != nil {
+			t.Fatalf("index_info(%s): %v", idx.Name, err)
+		}
+		if len(cols) == 1 && cols[0].Name == "task_id" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("checkpoints table has no UNIQUE index covering task_id alone; "+
+			"SetCheckpoint's upsert race-safety depends on this. Indexes seen: %+v",
+			indexes)
+	}
+}
+
+// TestCheckpoint_DuplicateInsertViaSchemaIsRejected — an
+// integration-level confirmation of the same invariant: trying to
+// hand-craft a second checkpoint row for the same task via a raw
+// INSERT must fail with a unique-violation. SetCheckpoint's upsert
+// recovery path relies on this surfacing as isUniqueViolation.
+func TestCheckpoint_DuplicateInsertViaSchemaIsRejected(t *testing.T) {
+	s := newTestStore(t)
+	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+	if _, err := s.SetCheckpoint(ctx(), task.ID, store.SetCheckpointOptions{
+		Recap: "r", NextSteps: "n",
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	err := s.DB().Exec(
+		"INSERT INTO checkpoints (task_id, recap, next_steps, open_threads, created_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
+		task.ID, "second", "second", "",
+	).Error
+	if err == nil {
+		t.Fatal("duplicate INSERT on (task_id) should fail; the unique constraint is the race-safety invariant for SetCheckpoint")
+	}
+	if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		t.Errorf("unexpected error shape (expected SQLite UNIQUE constraint failed): %v", err)
+	}
+}
+
 func TestCheckpoint_EmitsDeletedEvent(t *testing.T) {
 	s := newTestStore(t)
 	task, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})

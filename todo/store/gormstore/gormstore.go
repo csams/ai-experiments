@@ -2749,10 +2749,21 @@ func (s *GormStore) SetCheckpoint(ctx context.Context, taskID uint, opts store.S
 			return err
 		}
 
-		// Resolve insert vs update by attempting an INSERT first. The unique
-		// index on task_id makes this race-safe across both SQLite and
-		// Postgres — a concurrent caller's INSERT will fail with a duplicate
-		// key error, after which we fall through to the UPDATE path.
+		// Resolve insert vs update by attempting an INSERT first. The
+		// race-safety property hinges on a UNIQUE constraint on
+		// checkpoints.task_id, declared via the `uniqueIndex` GORM tag
+		// on model.Checkpoint.TaskID — that schema invariant is the
+		// load-bearing part of this design. A concurrent caller's
+		// INSERT will fail with a duplicate-key error which we
+		// recognize via isUniqueViolation and fall through to the
+		// UPDATE path.
+		//
+		// If the unique constraint is ever dropped, two parallel
+		// SetCheckpoint calls could both succeed at INSERT, producing
+		// duplicate checkpoint rows and breaking the singleton-per-
+		// task contract. A schema-guard test in
+		// gormstore_checkpoint_test.go pins the constraint's
+		// presence so a future migration cannot silently regress it.
 		cp = model.Checkpoint{
 			TaskID:      taskID,
 			Recap:       cleanRecap,
