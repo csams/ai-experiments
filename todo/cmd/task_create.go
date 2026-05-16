@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -66,43 +67,48 @@ var taskCreateCmd = &cobra.Command{
 }
 
 // parseLinkFlags converts repeatable --link values into []model.LinkInput.
-// Format per flag: "type=<jira|pr|url>,url=<URL>[,desc=<text>]".
-// Accepted keys (lowercase only): type, url, desc, description. Keys and
-// values are whitespace-trimmed. type and url are required; duplicate keys
-// within a single --link value are an error. Comma-in-description is not
-// supported (use `todo link add` after creation as a workaround).
+//
+// Two forms are accepted per flag:
+//
+//  1. JSON object — when the trimmed value's first char is '{':
+//
+//     --link '{"type":"jira","url":"https://x","description":"text, with, commas"}'
+//
+//     Use this when the description contains commas or other characters
+//     that the key=value form doesn't handle. Field names match
+//     model.LinkInput's json tags: "type", "url", "description". Note
+//     the JSON form does NOT accept the `desc` short alias the
+//     key=value form allows — use `description` here.
+//
+//  2. Legacy key=value list — comma-separated:
+//
+//     --link "type=<jira|pr|url>,url=<URL>[,desc=<text>]"
+//
+//     Accepted keys (lowercase): type, url, desc, description. Keys and
+//     values are whitespace-trimmed. Duplicate keys within one value are
+//     an error. Comma-in-description is NOT supported in this form;
+//     switch to the JSON form for that case.
+//
+// Both forms require type and url to be non-empty.
 func parseLinkFlags(flags []string) ([]model.LinkInput, error) {
 	if len(flags) == 0 {
 		return nil, nil
 	}
 	out := make([]model.LinkInput, 0, len(flags))
 	for _, raw := range flags {
-		if strings.TrimSpace(raw) == "" {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
 			return nil, fmt.Errorf("empty --link value")
 		}
-		seen := map[string]bool{}
 		var in model.LinkInput
-		for _, segment := range strings.Split(raw, ",") {
-			eq := strings.IndexByte(segment, '=')
-			if eq < 0 {
-				return nil, fmt.Errorf("--link segment %q has no '='", strings.TrimSpace(segment))
-			}
-			key := strings.TrimSpace(segment[:eq])
-			val := strings.TrimSpace(segment[eq+1:])
-			if seen[key] {
-				return nil, fmt.Errorf("--link has duplicate key %q", key)
-			}
-			seen[key] = true
-			switch key {
-			case "type":
-				in.Type = model.LinkType(val)
-			case "url":
-				in.URL = val
-			case "desc", "description":
-				in.Description = val
-			default:
-				return nil, fmt.Errorf("--link has unknown key %q (valid: type, url, desc)", key)
-			}
+		var err error
+		if trimmed[0] == '{' {
+			in, err = parseLinkJSON(trimmed)
+		} else {
+			in, err = parseLinkKV(raw)
+		}
+		if err != nil {
+			return nil, err
 		}
 		if in.Type == "" {
 			return nil, fmt.Errorf("--link missing required key 'type'")
@@ -115,6 +121,52 @@ func parseLinkFlags(flags []string) ([]model.LinkInput, error) {
 	return out, nil
 }
 
+// parseLinkJSON decodes a single --link value as a JSON object.
+// Unknown fields are an error (DisallowUnknownFields) so a typo in
+// "desription" doesn't get silently discarded.
+func parseLinkJSON(raw string) (model.LinkInput, error) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var in model.LinkInput
+	if err := dec.Decode(&in); err != nil {
+		return model.LinkInput{}, fmt.Errorf("--link JSON decode: %w", err)
+	}
+	// Reject trailing data after the closing brace — `{"type":"url",...} junk`.
+	if dec.More() {
+		return model.LinkInput{}, fmt.Errorf("--link JSON has trailing content after object")
+	}
+	return in, nil
+}
+
+// parseLinkKV decodes the legacy comma-separated key=value form.
+func parseLinkKV(raw string) (model.LinkInput, error) {
+	seen := map[string]bool{}
+	var in model.LinkInput
+	for _, segment := range strings.Split(raw, ",") {
+		eq := strings.IndexByte(segment, '=')
+		if eq < 0 {
+			return model.LinkInput{}, fmt.Errorf("--link segment %q has no '='", strings.TrimSpace(segment))
+		}
+		key := strings.TrimSpace(segment[:eq])
+		val := strings.TrimSpace(segment[eq+1:])
+		if seen[key] {
+			return model.LinkInput{}, fmt.Errorf("--link has duplicate key %q", key)
+		}
+		seen[key] = true
+		switch key {
+		case "type":
+			in.Type = model.LinkType(val)
+		case "url":
+			in.URL = val
+		case "desc", "description":
+			in.Description = val
+		default:
+			return model.LinkInput{}, fmt.Errorf("--link has unknown key %q (valid: type, url, desc)", key)
+		}
+	}
+	return in, nil
+}
+
 func init() {
 	taskCreateCmd.Flags().StringP("description", "d", "", "task description")
 	taskCreateCmd.Flags().IntP("priority", "p", 0, "priority (lower = more important)")
@@ -122,7 +174,8 @@ func init() {
 	taskCreateCmd.Flags().StringSlice("tag", nil, "tags (repeatable)")
 	taskCreateCmd.Flags().Uint("parent", 0, "create as a subtask of this parent task ID")
 	taskCreateCmd.Flags().StringArray("link", nil,
-		"attach a link (repeatable). Format: type=<jira|pr|url>,url=<URL>[,desc=<text>]. "+
-			"Comma-in-description is not supported; use the link add subcommand afterward for that case.")
+		"attach a link (repeatable). Two forms accepted: "+
+			"key=value list — `type=<jira|pr|url>,url=<URL>[,desc=<text>]`; or "+
+			"JSON object — `{\"type\":\"...\", \"url\":\"...\", \"description\":\"text, with, commas\"}` (use this when description contains commas).")
 	taskCmd.AddCommand(taskCreateCmd)
 }

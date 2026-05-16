@@ -68,6 +68,48 @@ func TestParseLinkFlags(t *testing.T) {
 			want: nil,
 		},
 
+		// JSON form (PR-23) — headlined by the comma-in-description case.
+		{
+			name: "json_with_comma_in_description",
+			in: []string{
+				`{"type":"jira","url":"https://x/y","description":"first, second, third"}`,
+			},
+			want: []model.LinkInput{
+				{Type: model.LinkJira, URL: "https://x/y", Description: "first, second, third"},
+			},
+		},
+		{
+			name: "json_minimal",
+			in:   []string{`{"type":"url","url":"https://x"}`},
+			want: []model.LinkInput{{Type: model.LinkURL, URL: "https://x"}},
+		},
+		{
+			name: "json_with_leading_whitespace",
+			in:   []string{`   {"type":"pr","url":"https://x"}`},
+			want: []model.LinkInput{{Type: model.LinkPR, URL: "https://x"}},
+		},
+		{
+			name: "mixed_forms_in_one_invocation",
+			in: []string{
+				`type=pr,url=https://x/1`,
+				`{"type":"jira","url":"https://y/2","description":"comma, ok"}`,
+			},
+			want: []model.LinkInput{
+				{Type: model.LinkPR, URL: "https://x/1"},
+				{Type: model.LinkJira, URL: "https://y/2", Description: "comma, ok"},
+			},
+		},
+		{
+			// Standard JSON unescape — pins the happy path for the
+			// "description contains shell-unfriendly characters"
+			// scenario the JSON form was added to solve.
+			name: "json_description_with_escaped_quotes",
+			in:   []string{`{"type":"url","url":"https://x","description":"he said \"hi\""}`},
+			want: []model.LinkInput{
+				{Type: model.LinkURL, URL: "https://x", Description: `he said "hi"`},
+			},
+		},
+
 		// Error cases
 		{name: "empty_value", in: []string{""}, wantErr: "empty --link"},
 		{name: "whitespace_only", in: []string{"   "}, wantErr: "empty --link"},
@@ -77,6 +119,43 @@ func TestParseLinkFlags(t *testing.T) {
 		{name: "duplicate_key", in: []string{"type=pr,type=jira,url=https://x"}, wantErr: `duplicate key "type"`},
 		{name: "segment_no_equals", in: []string{"type=pr,url"}, wantErr: "no '='"},
 		{name: "trailing_comma", in: []string{"type=pr,url=https://x,"}, wantErr: "no '='"},
+
+		// JSON-form error cases.
+		{
+			name:    "json_missing_url",
+			in:      []string{`{"type":"pr"}`},
+			wantErr: "missing required key 'url'",
+		},
+		{
+			name:    "json_missing_type",
+			in:      []string{`{"url":"https://x"}`},
+			wantErr: "missing required key 'type'",
+		},
+		{
+			name:    "json_unknown_field",
+			in:      []string{`{"type":"pr","url":"https://x","foo":"bar"}`},
+			wantErr: "JSON decode",
+		},
+		{
+			// Asymmetry pin: the KV form accepts `desc` as a short
+			// alias for `description`, but the JSON form decodes only
+			// into model.LinkInput's `description` tag. `desc` in JSON
+			// is treated as an unknown field (DisallowUnknownFields).
+			// Documented in the parseLinkFlags doc comment.
+			name:    "json_desc_short_alias_rejected",
+			in:      []string{`{"type":"pr","url":"https://x","desc":"hi"}`},
+			wantErr: "JSON decode",
+		},
+		{
+			name:    "json_malformed",
+			in:      []string{`{"type":"pr","url":}`},
+			wantErr: "JSON decode",
+		},
+		{
+			name:    "json_trailing_content",
+			in:      []string{`{"type":"pr","url":"https://x"} junk`},
+			wantErr: "trailing content",
+		},
 	}
 
 	for _, tc := range cases {
