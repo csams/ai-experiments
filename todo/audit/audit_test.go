@@ -211,6 +211,39 @@ func TestRedact_StructuralAttrsUntouched(t *testing.T) {
 	}
 }
 
+func TestAudit_ActorAttributeWhenSet(t *testing.T) {
+	lg, buf := captureLogger(t, Options{})
+
+	rec := emitAndDecode(t, lg, buf, store.StoreEvent{
+		Type:    "task.updated",
+		Source:  "mcp-http",
+		Actor:   "alice",
+		TaskIDs: []uint{42},
+	})
+
+	got, ok := rec["actor"].(string)
+	if !ok {
+		t.Fatalf("actor missing from audit record; rec=%v", rec)
+	}
+	if got != "alice" {
+		t.Errorf("actor = %q, want alice", got)
+	}
+}
+
+func TestAudit_ActorAttributeOmittedWhenEmpty(t *testing.T) {
+	lg, buf := captureLogger(t, Options{})
+
+	rec := emitAndDecode(t, lg, buf, store.StoreEvent{
+		Type:    "task.updated",
+		Source:  "mcp-stdio", // stdio path has no actor
+		TaskIDs: []uint{42},
+	})
+
+	if _, present := rec["actor"]; present {
+		t.Errorf("actor attribute should be omitted when event.Actor is empty; rec=%v", rec)
+	}
+}
+
 func TestRedact_NegativeCapFallsBackToDefault(t *testing.T) {
 	// A negative ValueCap is treated as "use default 256," not as
 	// "disabled" — disabling requires the explicit FullValues=true.

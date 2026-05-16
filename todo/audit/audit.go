@@ -60,6 +60,12 @@ func (a *Logger) OnEvent(_ context.Context, event store.StoreEvent) {
 		"operation", event.Type,
 		"source", event.Source,
 	}
+	if event.Actor != "" {
+		// HTTP MCP transport stamps the matched bearer-auth key label
+		// onto the event so multi-client deployments can attribute each
+		// mutation to a specific actor. Empty for stdio MCP and CLI.
+		attrs = append(attrs, "actor", event.Actor)
+	}
 
 	if len(event.TaskIDs) > 0 {
 		attrs = append(attrs, "task_ids", event.TaskIDs)

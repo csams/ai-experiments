@@ -188,9 +188,25 @@ type LogConfig struct {
 type MCPConfig struct {
 	Transport string `yaml:"transport" mapstructure:"transport"`
 	Addr      string `yaml:"addr" mapstructure:"addr"`
-	APIKey    string `yaml:"api_key" mapstructure:"api_key" json:"-"`
-	TLSCert   string `yaml:"tls_cert" mapstructure:"tls_cert"`
-	TLSKey    string `yaml:"tls_key" mapstructure:"tls_key"`
+
+	// APIKey is the legacy single-key form (one key, attributed in audit
+	// logs as actor="default"). When both APIKey and APIKeys are set,
+	// startup is refused — pick one. Prefer APIKeys for any new config.
+	APIKey string `yaml:"api_key" mapstructure:"api_key" json:"-"`
+
+	// APIKeys maps a label → key. The bearer-auth middleware accepts
+	// any matching key and stamps the corresponding label onto every
+	// authenticated request's audit events (see store.SetActorContext).
+	// Use labels like client / user names to attribute mutations in a
+	// multi-tenant deployment.
+	//
+	// Env-var configuration is awkward for maps; for single-key
+	// deployments stay with TODO_MCP_API_KEY (which still populates the
+	// legacy APIKey field). For multi-key deployments use a config file.
+	APIKeys map[string]string `yaml:"api_keys" mapstructure:"api_keys" json:"-"`
+
+	TLSCert string `yaml:"tls_cert" mapstructure:"tls_cert"`
+	TLSKey  string `yaml:"tls_key" mapstructure:"tls_key"`
 
 	// HTTP transport hardening knobs. All apply only when Transport == "http".
 
@@ -212,13 +228,45 @@ type MCPConfig struct {
 	WriteTimeout time.Duration `yaml:"write_timeout" mapstructure:"write_timeout"`
 }
 
-// String returns the config with APIKey masked, suitable for logging.
-// Adding a new sensitive field to MCPConfig requires updating this
-// method (mask the field on the shadow before formatting).
+// ResolveAPIKeys returns the effective label→key map after applying
+// the legacy/single-tenant back-compat: an APIKey-only config resolves
+// to {"default": APIKey}, an APIKeys-only config resolves to itself
+// (a copy, to keep callers from mutating m), and a config setting
+// both at once is rejected so the operator picks an intent. Returns
+// (nil, nil) when neither is set — caller treats that as no auth.
+func (m MCPConfig) ResolveAPIKeys() (map[string]string, error) {
+	if m.APIKey != "" && len(m.APIKeys) > 0 {
+		return nil, fmt.Errorf("mcp.api_key and mcp.api_keys are mutually exclusive (api_key is the legacy single-tenant form; pick one)")
+	}
+	if m.APIKey != "" {
+		return map[string]string{"default": m.APIKey}, nil
+	}
+	if len(m.APIKeys) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(m.APIKeys))
+	for label, key := range m.APIKeys {
+		out[label] = key
+	}
+	return out, nil
+}
+
+// String returns the config with APIKey / APIKeys masked, suitable for
+// logging. Adding a new sensitive field to MCPConfig requires updating
+// this method (mask the field on the shadow before formatting).
 func (m MCPConfig) String() string {
 	masked := shadowMCP(m)
 	if masked.APIKey != "" {
 		masked.APIKey = Mask
+	}
+	if len(masked.APIKeys) > 0 {
+		// Keep the label keys (operationally useful — tells the
+		// operator which clients are configured) but mask each value.
+		redacted := make(map[string]string, len(masked.APIKeys))
+		for label := range masked.APIKeys {
+			redacted[label] = Mask
+		}
+		masked.APIKeys = redacted
 	}
 	return fmt.Sprintf("%+v", masked)
 }

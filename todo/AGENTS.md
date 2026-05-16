@@ -289,21 +289,40 @@ Long descriptions and notes are split into overlapping ~3000-rune chunks (200-ru
 
 ## MCP HTTP transport — API key
 
-When `mcp.api_key` is set, the HTTP transport enforces it via a `Bearer <key>` header. Two startup-time invariants:
+The HTTP transport supports two authentication forms:
 
-1. API key + no TLS is refused unless `--insecure` is passed (developer override). TLS cert/key come from `mcp.tls_cert` / `mcp.tls_key` or the matching env vars.
-2. API key length is checked: anything shorter than 20 characters is rejected at startup with a clear error message pointing at the `todo mcp gen-key` subcommand. The `--insecure` flag does *not* bypass this — transport security and credential strength are independent concerns.
+- **Single-tenant** — `mcp.api_key` (string). One key; every authenticated request is attributed to actor `"default"` in audit logs. Suitable for personal deployments. Also configurable via the `TODO_MCP_API_KEY` env var.
+- **Multi-tenant** — `mcp.api_keys` (map of label → key). Each label appears as the `actor` field on audit records for requests authenticated with the corresponding key, so a multi-client deployment attributes every mutation to the MCP client that issued it. Env-var config is awkward for maps — use a config file.
+
+The two forms are mutually exclusive; setting both rejects startup.
+
+Three startup-time invariants regardless of form:
+
+1. **Auth without TLS is refused** unless `--insecure` is passed (developer override). TLS cert/key come from `mcp.tls_cert` / `mcp.tls_key` or the matching env vars.
+2. **Every configured key must be ≥ 20 characters.** `--insecure` does NOT bypass this — transport security and credential strength are independent concerns. For multi-tenant, a single weak key rejects startup with the offending label in the error.
+3. **The bearer middleware runs all key comparisons per request** (no early-return on match), so per-key timing can't distinguish which key was hit. Per-request cost is N constant-time 32-byte hash compares — trivial up to thousands of keys.
 
 Generate a fresh key with:
 
 ```bash
 todo mcp gen-key  # prints 64 hex chars (32 random bytes)
 
-# Typical wiring:
+# Single-tenant wiring:
 TODO_MCP_API_KEY=$(todo mcp gen-key) ./todo mcp --transport http
+
+# Multi-tenant — set in a config file:
+# mcp:
+#   api_keys:
+#     alice: "<paste output of todo mcp gen-key>"
+#     bob:   "<paste output of todo mcp gen-key>"
 ```
 
-**Migration callout (breaking change):** Existing deployments running with an API key shorter than 20 characters will fail to start after this upgrade. Generate a longer key with `todo mcp gen-key` (or hand-pick one with sufficient entropy) and update the `TODO_MCP_API_KEY` env var / `mcp.api_key` config.
+Audit records pick up the matched label via `store.SetActorContext`, set by the bearer middleware on each authenticated request. The `StoreEvent.Actor` field surfaces in the audit log as the `actor=` attribute when present; it is empty for stdio-MCP and CLI usage.
+
+**Migration callouts:**
+
+- **Breaking change** — existing deployments running with an API key shorter than 20 characters will fail to start. Generate a longer key with `todo mcp gen-key` and update the config / env var.
+- **Deprecation hint** — `mcp.api_key` (single-tenant) still works and maps to actor `"default"`. New multi-client deployments should prefer `mcp.api_keys` so audit logs can attribute mutations to specific clients. The MCP server logs an info-level note at startup when the legacy form is in use.
 
 ## TLS Certificates
 

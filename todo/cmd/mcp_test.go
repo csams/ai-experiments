@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/csams/todo/config"
+	"github.com/csams/todo/store"
 )
 
 func TestBodySizeLimitMiddleware(t *testing.T) {
@@ -75,7 +77,7 @@ func TestBearerAuthMiddleware(t *testing.T) {
 	})
 
 	const apiKey = "supersecret-32-byte-token-xyz0123"
-	h := bearerAuthMiddleware(apiKey, sink)
+	h := bearerAuthMiddleware(map[string]string{"default": apiKey}, sink)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -151,7 +153,7 @@ func TestBearerAuthMiddleware(t *testing.T) {
 // length-mismatch fast-path in subtle.ConstantTimeCompare cannot fire.
 func TestBearerAuthMiddleware_NoLengthLeak(t *testing.T) {
 	const apiKey = "expectedkey"
-	h := bearerAuthMiddleware(apiKey, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := bearerAuthMiddleware(map[string]string{"default": apiKey}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -220,7 +222,7 @@ func TestValidateMCPHTTPConfig(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateMCPHTTPConfig(tc.cfg, tc.insecure)
+			_, err := validateMCPHTTPConfig(tc.cfg, tc.insecure)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Errorf("expected nil error, got %v", err)
@@ -244,12 +246,128 @@ func TestValidateMCPHTTPConfig(t *testing.T) {
 // anyway, and "auth without TLS" is the louder operational concern.
 func TestValidateMCPHTTPConfig_TLSPrecedesLengthCheck(t *testing.T) {
 	cfg := config.MCPConfig{APIKey: "shortkey"} // no TLS, short key
-	err := validateMCPHTTPConfig(cfg, false)
+	_, err := validateMCPHTTPConfig(cfg, false)
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(err.Error(), "API key auth requires TLS") {
 		t.Errorf("expected TLS error first, got %q", err.Error())
+	}
+}
+
+func TestValidateMCPHTTPConfig_ResolvesAPIKeys(t *testing.T) {
+	// Confirm the resolved map shape for the three supported config
+	// forms.
+	longKey := strings.Repeat("a", minAPIKeyLength)
+
+	t.Run("api_key_legacy_resolves_to_default_label", func(t *testing.T) {
+		keys, err := validateMCPHTTPConfig(config.MCPConfig{
+			APIKey: longKey, TLSCert: "/x",
+		}, false)
+		if err != nil {
+			t.Fatalf("validate: %v", err)
+		}
+		if got, want := keys, map[string]string{"default": longKey}; !reflect.DeepEqual(got, want) {
+			t.Errorf("resolved keys = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("api_keys_passes_through", func(t *testing.T) {
+		input := map[string]string{"alice": longKey, "bob": longKey + "b"}
+		keys, err := validateMCPHTTPConfig(config.MCPConfig{
+			APIKeys: input, TLSCert: "/x",
+		}, false)
+		if err != nil {
+			t.Fatalf("validate: %v", err)
+		}
+		if !reflect.DeepEqual(keys, input) {
+			t.Errorf("resolved keys = %v, want %v", keys, input)
+		}
+	})
+
+	t.Run("both_set_rejected", func(t *testing.T) {
+		_, err := validateMCPHTTPConfig(config.MCPConfig{
+			APIKey:  longKey,
+			APIKeys: map[string]string{"alice": longKey},
+			TLSCert: "/x",
+		}, false)
+		if err == nil {
+			t.Fatal("expected error for setting both api_key and api_keys")
+		}
+		if !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Errorf("error = %q, want substring 'mutually exclusive'", err.Error())
+		}
+	})
+
+	t.Run("any_short_key_in_map_rejects", func(t *testing.T) {
+		_, err := validateMCPHTTPConfig(config.MCPConfig{
+			APIKeys: map[string]string{"alice": longKey, "bob": "short"},
+			TLSCert: "/x",
+		}, false)
+		if err == nil {
+			t.Fatal("expected error for short key in map")
+		}
+		if !strings.Contains(err.Error(), `"bob"`) {
+			t.Errorf("expected error to name 'bob', got %q", err.Error())
+		}
+	})
+}
+
+func TestBearerAuthMiddleware_MultiKeyStampsActor(t *testing.T) {
+	var seenActor string
+	sink := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenActor = store.ActorFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	keys := map[string]string{
+		"alice": "alice-api-key-very-long-string",
+		"bob":   "bob-api-key-also-very-long-yes",
+	}
+	h := bearerAuthMiddleware(keys, sink)
+
+	cases := []struct {
+		name      string
+		token     string
+		wantCode  int
+		wantActor string
+	}{
+		{"alice_token", "alice-api-key-very-long-string", http.StatusOK, "alice"},
+		{"bob_token", "bob-api-key-also-very-long-yes", http.StatusOK, "bob"},
+		{"unknown_token", "nope", http.StatusUnauthorized, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seenActor = ""
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != tc.wantCode {
+				t.Errorf("status = %d, want %d", w.Code, tc.wantCode)
+			}
+			if seenActor != tc.wantActor {
+				t.Errorf("actor = %q, want %q", seenActor, tc.wantActor)
+			}
+		})
+	}
+}
+
+func TestBearerAuthMiddleware_EmptyKeysRejectsAll(t *testing.T) {
+	// With no configured keys, every request should be unauthorized —
+	// the empty-map case is a misconfiguration (the call site should
+	// register a different middleware), but the bearer middleware must
+	// fail closed.
+	sink := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := bearerAuthMiddleware(map[string]string{}, sink)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer anything")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d (empty keys must fail closed)", w.Code, http.StatusUnauthorized)
 	}
 }
 

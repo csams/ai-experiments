@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
 	"github.com/csams/todo/config"
 	todomcp "github.com/csams/todo/mcp"
+	"github.com/csams/todo/store"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
 )
@@ -77,14 +79,23 @@ HTTP streamable transport (for remote / multi-client access).`,
 			}
 
 			insecure, _ := cmd.Flags().GetBool("insecure")
-			if err := validateMCPHTTPConfig(cfg.MCP, insecure); err != nil {
+			apiKeys, err := validateMCPHTTPConfig(cfg.MCP, insecure)
+			if err != nil {
 				return err
 			}
-			if cfg.MCP.APIKey != "" && cfg.MCP.TLSCert == "" && insecure {
-				logger.Warn("MCP API key auth enabled without TLS; tokens sent in cleartext (--insecure)")
-			}
-			if cfg.MCP.APIKey == "" {
+			if len(apiKeys) == 0 {
 				logger.Warn("MCP HTTP server starting without authentication; all clients have full access")
+			} else {
+				if cfg.MCP.TLSCert == "" && insecure {
+					logger.Warn("MCP API key auth enabled without TLS; tokens sent in cleartext (--insecure)")
+				}
+				if cfg.MCP.APIKey != "" {
+					// Legacy single-tenant form. Audit events will
+					// attribute every action to actor="default".
+					logger.Info("MCP using legacy single-tenant api_key (actor=default); consider moving to api_keys for per-client attribution")
+				} else {
+					logger.Info("MCP multi-tenant auth enabled", "key_count", len(apiKeys))
+				}
 			}
 
 			var handler http.Handler
@@ -104,8 +115,8 @@ HTTP streamable transport (for remote / multi-client access).`,
 			// its own cap, so an unbounded body would force unbounded buffering.
 			capped := bodySizeLimitMiddleware(cfg.MCP.MaxBodyBytes, inner)
 
-			if cfg.MCP.APIKey != "" {
-				mux.Handle("/mcp", bearerAuthMiddleware(cfg.MCP.APIKey, capped))
+			if len(apiKeys) > 0 {
+				mux.Handle("/mcp", bearerAuthMiddleware(apiKeys, capped))
 			} else {
 				mux.Handle("/mcp", capped)
 			}
@@ -147,30 +158,53 @@ HTTP streamable transport (for remote / multi-client access).`,
 }
 
 // validateMCPHTTPConfig enforces startup-time invariants on the HTTP
-// transport's config. Returns a non-nil error when the operator should
-// fix something before the server starts.
+// transport's config and returns the resolved label→key map for the
+// caller to feed bearerAuthMiddleware.
 //
 // Rules:
-//   - API key without TLS: refuse unless --insecure (developer override).
-//   - API key shorter than minAPIKeyLength: refuse regardless of
+//   - api_key and api_keys cannot both be set (mutually exclusive
+//     forms; ResolveAPIKeys returns an error for the caller to surface).
+//   - Any keys configured without TLS: refuse unless --insecure
+//     (developer override).
+//   - Every key shorter than minAPIKeyLength: refuse regardless of
 //     --insecure. Weak credentials are weak credentials; the dev/prod
 //     transport choice is independent. Use `todo mcp gen-key` to
-//     generate a strong key.
+//     generate strong keys.
+//   - When api_keys is set, every value is validated. A single weak
+//     key in a multi-tenant config rejects startup.
 //
-// Warnings (cleartext-on-insecure, no-auth-at-all) live at the call
-// site so they fire after this check passes.
-func validateMCPHTTPConfig(c config.MCPConfig, insecure bool) error {
-	if c.APIKey == "" {
-		return nil
+// A nil-or-empty return map means "no auth configured" — the caller
+// registers a different middleware (or none) for that path.
+//
+// Warnings (cleartext-on-insecure, no-auth-at-all, single-tenant
+// deprecation hint) live at the call site so they fire after this
+// check passes.
+func validateMCPHTTPConfig(c config.MCPConfig, insecure bool) (map[string]string, error) {
+	keys, err := c.ResolveAPIKeys()
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, nil
 	}
 	if c.TLSCert == "" && !insecure {
-		return fmt.Errorf("API key auth requires TLS (set tls_cert/tls_key in config or via TODO_MCP_TLS_CERT/TODO_MCP_TLS_KEY env vars, or use --insecure for development)")
+		return nil, fmt.Errorf("API key auth requires TLS (set tls_cert/tls_key in config or via TODO_MCP_TLS_CERT/TODO_MCP_TLS_KEY env vars, or use --insecure for development)")
 	}
-	if len(c.APIKey) < minAPIKeyLength {
-		return fmt.Errorf("MCP API key must be at least %d characters (got %d); generate a strong key with `todo mcp gen-key`",
-			minAPIKeyLength, len(c.APIKey))
+	// Length-check every key. Sort labels so the error message is
+	// stable across runs (map iteration would otherwise pick a random
+	// "first" violator).
+	labels := make([]string, 0, len(keys))
+	for label := range keys {
+		labels = append(labels, label)
 	}
-	return nil
+	sort.Strings(labels)
+	for _, label := range labels {
+		if len(keys[label]) < minAPIKeyLength {
+			return nil, fmt.Errorf("MCP API key %q must be at least %d characters (got %d); generate a strong key with `todo mcp gen-key`",
+				label, minAPIKeyLength, len(keys[label]))
+		}
+	}
+	return keys, nil
 }
 
 // mcpGenKeyCmd prints a freshly-generated random API key suitable for
@@ -211,28 +245,64 @@ func bodySizeLimitMiddleware(maxBytes int64, next http.Handler) http.Handler {
 }
 
 // bearerAuthMiddleware checks the Authorization header against the
-// configured API key in constant time.
+// configured API keys in constant time, then stamps the matched key's
+// label onto the request context via store.SetActorContext so audit
+// events emitted downstream carry that identity.
 //
-// We hash both sides with SHA-256 before comparison. The plain
-// subtle.ConstantTimeCompare form returns 0 immediately when the input
-// lengths differ — that bypass short-circuits the constant-time
-// guarantee and leaks the expected length (i.e. the API key length plus
-// 7 for "Bearer "). Hashing first equalizes the lengths so the timing
-// of the compare depends only on the hash output, not the input shape.
+// Hashing both sides with SHA-256 before comparison equalizes input
+// lengths so subtle.ConstantTimeCompare's length-mismatch fast-path
+// can't fire and leak the expected length. With multiple keys, the
+// loop iterates ALL configured keys on every request (never short-
+// circuits on first match) so total work doesn't reveal which key
+// matched. With N keys the per-request cost is N constant-time
+// 32-byte compares — trivial up to thousands of keys.
 //
-// SHA-256 is the right primitive here because the API key is
-// high-entropy (the gen-key path produces 256-bit random tokens). A
-// password hash (bcrypt/argon2) would be wrong: it's optimized for
-// stretching low-entropy passwords, not for one-shot equality checks.
-func bearerAuthMiddleware(apiKey string, next http.Handler) http.Handler {
-	wantSum := sha256.Sum256([]byte("Bearer " + apiKey))
+// SHA-256 is the right primitive: the API keys are high-entropy
+// (gen-key produces 256-bit random tokens). A password hash (bcrypt /
+// argon2) would be wrong — it's tuned to stretch low-entropy passwords,
+// not for one-shot equality checks.
+//
+// The keys map is empty → caller should not register this middleware
+// (the no-auth code path runs instead). A zero-length map at runtime
+// rejects every request.
+func bearerAuthMiddleware(keys map[string]string, next http.Handler) http.Handler {
+	// Pre-hash each configured key once at startup. Sort labels so
+	// iteration order is deterministic regardless of map randomization,
+	// which makes tests stable; the security guarantee depends only on
+	// running the full loop, not on order.
+	labels := make([]string, 0, len(keys))
+	for label := range keys {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	type entry struct {
+		label string
+		hash  [32]byte
+	}
+	entries := make([]entry, len(labels))
+	for i, label := range labels {
+		entries[i] = entry{label: label, hash: sha256.Sum256([]byte("Bearer " + keys[label]))}
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSum := sha256.Sum256([]byte(r.Header.Get("Authorization")))
-		if subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 {
+		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		matched := ""
+		for _, e := range entries {
+			// Intentionally NOT short-circuiting on first match: every
+			// request runs N comparisons so timing can't distinguish
+			// which key matched. ConstantTimeCompare returns 1 on hit
+			// and 0 on miss; we just remember the last hit (there
+			// should be at most one — duplicate keys across labels are
+			// a misconfiguration the caller can audit at startup).
+			if subtle.ConstantTimeCompare(got[:], e.hash[:]) == 1 {
+				matched = e.label
+			}
+		}
+		if matched == "" {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(store.SetActorContext(r.Context(), matched)))
 	})
 }
 

@@ -37,8 +37,18 @@ logging:
 mcp:
   transport: http
   addr: ":8080"
-  api_key: ""    # injected via TODO_MCP_API_KEY env var; do NOT put keys here.
-                 # Must be at least 20 characters when set. Generate one with `todo mcp gen-key`.
+  # Single-tenant form: one key. The audit log attributes every action
+  # to actor="default". Inject via TODO_MCP_API_KEY env var; do NOT put
+  # the key here. Must be at least 20 characters when set.
+  api_key: ""
+  # Multi-tenant form: label → key. Each label appears as the audit log
+  # `actor` field for requests authenticated with the matching key.
+  # Mutually exclusive with api_key. Env-var configuration is awkward
+  # for maps; use a config file for multi-tenant deployments. Generate
+  # keys with `todo mcp gen-key`.
+  # api_keys:
+  #   alice: "<long-random-string>"
+  #   bob:   "<long-random-string>"
   tls_cert: /etc/todo/certs/mcp/server.crt
   tls_key: /etc/todo/certs/mcp/server.key
   # HTTP transport hardening. Defaults applied when omitted.

@@ -101,6 +101,39 @@ func TestMCPConfig_StringMasksAPIKey(t *testing.T) {
 	}
 }
 
+// TestMCPConfig_StringMasksAPIKeysMap pins the masking behavior for the
+// multi-tenant APIKeys field added in PR-18. Labels stay visible (an
+// operator scanning logs can still see which clients are configured)
+// but every value is replaced with the mask marker.
+func TestMCPConfig_StringMasksAPIKeysMap(t *testing.T) {
+	const (
+		secretAlice = "ALICE-KEY-SHOULD-NEVER-LEAK"
+		secretBob   = "BOB-KEY-SHOULD-NEVER-LEAK"
+	)
+	m := MCPConfig{
+		APIKeys: map[string]string{
+			"alice": secretAlice,
+			"bob":   secretBob,
+		},
+	}
+	s := m.String()
+	if strings.Contains(s, secretAlice) {
+		t.Errorf("MCPConfig.String leaked alice's key: %q", s)
+	}
+	if strings.Contains(s, secretBob) {
+		t.Errorf("MCPConfig.String leaked bob's key: %q", s)
+	}
+	if !strings.Contains(s, "alice") {
+		t.Errorf("alice label should remain visible (operator wants to see which clients are configured): %q", s)
+	}
+	if !strings.Contains(s, "bob") {
+		t.Errorf("bob label should remain visible: %q", s)
+	}
+	if !strings.Contains(s, Mask) {
+		t.Errorf("expected mask marker in MCPConfig.String, got %q", s)
+	}
+}
+
 func TestMCPConfig_StringEmptyAPIKeyOmitsMask(t *testing.T) {
 	m := MCPConfig{Transport: "stdio"}
 	if strings.Contains(m.String(), Mask) {

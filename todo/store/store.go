@@ -302,7 +302,36 @@ type StoreEvent struct {
 	TaskIDs []uint            // affected task IDs
 	NoteIDs []uint            // affected note IDs (if applicable)
 	Source  string            // "cli", "mcp-stdio", "mcp-http"
+	Actor   string            // authenticated client label, if any (set via SetActorContext)
 	Changes map[string]Change // field -> {old, new} for updates
+}
+
+// actorContextKey is the unexported context.Value key carrying an
+// authenticated actor label. Stored as a typed empty struct so it
+// cannot collide with another package's keys, even if both choose the
+// same string. Callers go through SetActorContext / ActorFromContext.
+type actorContextKey struct{}
+
+// SetActorContext returns a child context carrying the given actor
+// label. Used by the bearer-auth middleware (cmd/mcp.go) to stamp each
+// authenticated request with the API-key label that matched. The label
+// flows through to StoreEvent.Actor via the store's emit path, so audit
+// logs distinguish actions taken by different MCP clients.
+func SetActorContext(ctx context.Context, actor string) context.Context {
+	if actor == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, actorContextKey{}, actor)
+}
+
+// ActorFromContext returns the actor label associated with ctx, or "" if
+// none is set. CLI commands and the stdio MCP transport carry no actor —
+// audit events from those paths leave the field empty.
+func ActorFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(actorContextKey{}).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // Change records a before/after value for a field.

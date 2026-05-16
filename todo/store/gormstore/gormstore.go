@@ -194,6 +194,10 @@ func (s *GormStore) DB() *gorm.DB {
 
 func (s *GormStore) emit(ctx context.Context, event store.StoreEvent) {
 	event.Source = s.source
+	// Stamp the authenticated actor (if any) onto the event before
+	// observers see it. Set by the bearer-auth middleware on HTTP
+	// requests; empty for stdio MCP and direct CLI usage.
+	event.Actor = store.ActorFromContext(ctx)
 
 	// Read observers and reserve wg slots in the same RLock-protected
 	// region. This is what prevents the Add/Wait race with Close: Close
