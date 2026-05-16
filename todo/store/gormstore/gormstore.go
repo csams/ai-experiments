@@ -2,12 +2,14 @@ package gormstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -564,49 +566,69 @@ func (s *GormStore) collectSubtreeIDs(tx *gorm.DB, rootID uint) ([]uint, error) 
 
 // --- Blocking cycle detection ---
 
-// hasBlockingCycle checks if adding "blockerID blocks taskID" would create a cycle.
-// A cycle exists if taskID already transitively blocks blockerID.
+// hasBlockingCycle checks if adding "blockerID blocks taskID" would
+// create a cycle. A cycle exists if taskID already transitively blocks
+// blockerID, i.e. walking upstream from blockerID through the
+// task_blockers graph reaches taskID.
+//
+// One recursive CTE replaces the prior N+1-query BFS. The seed selects
+// the direct upstream blockers of blockerID; each recursive step joins
+// task_blockers to extend the path one hop further upward. A path
+// column carries the comma-wrapped node ID list (",a,b,c,") so the
+// recursive step can prune already-visited nodes via NOT LIKE and so
+// the application can reconstruct the cycle path on a hit.
+//
+// The query is portable across SQLite and Postgres: both support
+// WITH RECURSIVE, CAST(... AS TEXT), and string LIKE matching with
+// the standard %-wildcard.
+//
+// Returned path on cycle: [taskID, blockerID, …intermediate IDs…,
+// taskID] — the closing duplicate signals where the cycle would
+// reconnect if blockerID→taskID were added.
 func (s *GormStore) hasBlockingCycle(tx *gorm.DB, taskID, blockerID uint) (bool, []uint, error) {
-	// Walk from blockerID upward through its own blockers to see if we reach taskID.
-	// "blockerID's blockers" are tasks that block the blocker.
-	visited := map[uint]bool{}
-	parent := map[uint]uint{}
-	queue := []uint{blockerID}
-	visited[blockerID] = true
-
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-
-		// Find what blocks `current`
-		var upstreamBlockers []model.TaskBlocker
-		if err := tx.Where("task_id = ?", current).Find(&upstreamBlockers).Error; err != nil {
-			return false, nil, fmt.Errorf("cycle detection query: %w", err)
+	const cycleQuery = `
+WITH RECURSIVE upstream(node, path) AS (
+    SELECT blocker_id, ',' || CAST(blocker_id AS TEXT) || ','
+    FROM task_blockers
+    WHERE task_id = ?
+    UNION ALL
+    SELECT tb.blocker_id, u.path || CAST(tb.blocker_id AS TEXT) || ','
+    FROM task_blockers tb
+    JOIN upstream u ON tb.task_id = u.node
+    WHERE u.path NOT LIKE '%,' || CAST(tb.blocker_id AS TEXT) || ',%'
+)
+SELECT path FROM upstream WHERE node = ? LIMIT 1
+`
+	var pathStr string
+	err := tx.Raw(cycleQuery, blockerID, taskID).Row().Scan(&pathStr)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil, nil
 		}
-		for _, b := range upstreamBlockers {
-			if b.BlockerID == taskID {
-				// Found cycle. Reconstruct path from blockerID to current via parent map,
-				// then append taskID to close the cycle.
-				var path []uint
-				at := current
-				for at != blockerID {
-					path = append([]uint{at}, path...)
-					at = parent[at]
-				}
-				path = append([]uint{blockerID}, path...)
-				// The cycle: taskID -> blockerID -> ... -> current -> taskID
-				path = append([]uint{taskID}, path...)
-				path = append(path, taskID)
-				return true, path, nil
-			}
-			if !visited[b.BlockerID] {
-				visited[b.BlockerID] = true
-				parent[b.BlockerID] = current
-				queue = append(queue, b.BlockerID)
-			}
-		}
+		return false, nil, fmt.Errorf("cycle detection query: %w", err)
 	}
-	return false, nil, nil
+
+	// Parse the comma-wrapped chain into uints. The seed selected
+	// blocker_id where task_id=blockerID, so the chain *starts* with
+	// the direct upstream of blockerID (blockerID itself is never in
+	// path) and *ends* with taskID (the WHERE-clause-matched row).
+	// parts therefore reads: [first-upstream-of-blockerID, …, taskID].
+	trimmed := strings.Trim(pathStr, ",")
+	if trimmed == "" {
+		// Defensive — the WHERE clause matched so path should be non-empty.
+		return false, nil, nil
+	}
+	parts := strings.Split(trimmed, ",")
+	path := make([]uint, 0, len(parts)+2)
+	path = append(path, taskID, blockerID)
+	for _, p := range parts {
+		n, err := strconv.ParseUint(p, 10, 64)
+		if err != nil {
+			return false, nil, fmt.Errorf("cycle path parse %q: %w", p, err)
+		}
+		path = append(path, uint(n))
+	}
+	return true, path, nil
 }
 
 // --- Parent cycle detection ---

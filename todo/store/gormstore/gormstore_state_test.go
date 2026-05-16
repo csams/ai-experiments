@@ -525,3 +525,86 @@ func TestUpdateBlockers_StructuralCycleStillRejected(t *testing.T) {
 		t.Fatalf("expected CycleDetectedError for structural cycle, got %v", err)
 	}
 }
+
+// TestAddBlockers_CycleDetectionDeepChain — pins PR-15's recursive-CTE
+// rewrite. The prior BFS did one query per traversed node; the CTE does
+// one round-trip total. Walking a deep chain of N tasks each blocked by
+// the previous one exercises the recursion's path-tracking column and
+// confirms it terminates correctly without revisiting nodes.
+func TestAddBlockers_CycleDetectionDeepChain(t *testing.T) {
+	s := newTestStore(t)
+	const N = 50
+	tasks := make([]uint, N)
+	for i := 0; i < N; i++ {
+		task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "T"})
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		tasks[i] = task.ID
+	}
+	// Chain: task[i] is blocked by task[i-1]. So task[N-1] is
+	// transitively blocked by task[0] through N-1 hops.
+	for i := 1; i < N; i++ {
+		if _, err := s.AddBlockers(ctx(), tasks[i], []uint{tasks[i-1]}); err != nil {
+			t.Fatalf("add blocker at %d: %v", i, err)
+		}
+	}
+
+	// Adding "task[0] is blocked by task[N-1]" closes the cycle.
+	_, err := s.AddBlockers(ctx(), tasks[0], []uint{tasks[N-1]})
+	var ce *model.CycleDetectedError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected CycleDetectedError on N=%d-deep chain, got %v", N, err)
+	}
+	// The path should report at least the endpoints — sanity check
+	// without pinning the exact intermediate order (the CTE doesn't
+	// guarantee BFS shortest-path order).
+	if len(ce.Path) < 2 {
+		t.Errorf("cycle path = %v, want at least taskID and blockerID", ce.Path)
+	}
+	if ce.Path[0] != tasks[0] {
+		t.Errorf("cycle path should start with taskID=%d, got %d", tasks[0], ce.Path[0])
+	}
+	if ce.Path[len(ce.Path)-1] != tasks[0] {
+		t.Errorf("cycle path should end with taskID=%d (closing the loop), got %d",
+			tasks[0], ce.Path[len(ce.Path)-1])
+	}
+}
+
+// TestAddBlockers_NonCycleUpstreamDoesNotFalsePositive — task X has a
+// long upstream chain, but the chain doesn't reach Y. Adding "Y is
+// blocked by X" must not trigger cycle detection (X's upstream is
+// disjoint from Y).
+func TestAddBlockers_NonCycleUpstreamDoesNotFalsePositive(t *testing.T) {
+	s := newTestStore(t)
+	x, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "X"})
+	if err != nil {
+		t.Fatalf("create X: %v", err)
+	}
+	y, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "Y"})
+	if err != nil {
+		t.Fatalf("create Y: %v", err)
+	}
+	upstream := make([]uint, 5)
+	for i := range upstream {
+		task, err := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "up"})
+		if err != nil {
+			t.Fatalf("create upstream %d: %v", i, err)
+		}
+		upstream[i] = task.ID
+	}
+	// Build a chain: x ← upstream[0] ← upstream[1] ← ... ← upstream[4].
+	if _, err := s.AddBlockers(ctx(), x.ID, []uint{upstream[0]}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for i := 1; i < len(upstream); i++ {
+		if _, err := s.AddBlockers(ctx(), upstream[i-1], []uint{upstream[i]}); err != nil {
+			t.Fatalf("chain %d: %v", i, err)
+		}
+	}
+
+	// Y has no relationship with the chain. "Y blocked by X" must succeed.
+	if _, err := s.AddBlockers(ctx(), y.ID, []uint{x.ID}); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
