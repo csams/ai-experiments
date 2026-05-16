@@ -287,6 +287,24 @@ Long descriptions and notes are split into overlapping ~3000-rune chunks (200-ru
 
 **Migration callout (breaking storage change):** the row ID format changed and a `chunk_index` column was added to `vector_documents`. The schema migration is automatic on first connect. Old single-doc rows (`task:42`, `note:17`) won't be overwritten by the new chunked IDs, but the sync paths (`embedTasks`/`embedNotes`/`Reindex`) call `DeleteTaskDocs`/`DeleteNoteDocs` before re-upserting, which clears them out for any task or note that gets touched. The recommended migration step is **`todo vector reindex --clear`** — it drops the table outright, which also removes orphaned rows for tasks deleted before the upgrade. A plain `todo vector reindex` (no `--clear`) will clean up old rows for *current* tasks and notes but leaves orphans behind.
 
+## MCP HTTP transport — API key
+
+When `mcp.api_key` is set, the HTTP transport enforces it via a `Bearer <key>` header. Two startup-time invariants:
+
+1. API key + no TLS is refused unless `--insecure` is passed (developer override). TLS cert/key come from `mcp.tls_cert` / `mcp.tls_key` or the matching env vars.
+2. API key length is checked: anything shorter than 20 characters is rejected at startup with a clear error message pointing at the `todo mcp gen-key` subcommand. The `--insecure` flag does *not* bypass this — transport security and credential strength are independent concerns.
+
+Generate a fresh key with:
+
+```bash
+todo mcp gen-key  # prints 64 hex chars (32 random bytes)
+
+# Typical wiring:
+TODO_MCP_API_KEY=$(todo mcp gen-key) ./todo mcp --transport http
+```
+
+**Migration callout (breaking change):** Existing deployments running with an API key shorter than 20 characters will fail to start after this upgrade. Generate a longer key with `todo mcp gen-key` (or hand-pick one with sufficient entropy) and update the `TODO_MCP_API_KEY` env var / `mcp.api_key` config.
+
 ## TLS Certificates
 
 The deployment uses a local CA to issue TLS serving certificates for PostgreSQL and the MCP server.

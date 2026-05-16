@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/csams/todo/config"
 )
 
 func TestBodySizeLimitMiddleware(t *testing.T) {
@@ -163,6 +166,135 @@ func TestBearerAuthMiddleware_NoLengthLeak(t *testing.T) {
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("auth %q (len=%d): status = %d, want 401", val, len(val), w.Code)
 		}
+	}
+}
+
+func TestValidateMCPHTTPConfig(t *testing.T) {
+	longKey := strings.Repeat("a", minAPIKeyLength)
+	shortKey := strings.Repeat("a", minAPIKeyLength-1)
+
+	cases := []struct {
+		name     string
+		cfg      config.MCPConfig
+		insecure bool
+		wantErr  string // substring; "" means expect nil error
+	}{
+		{
+			name:    "no_api_key_no_tls_is_fine",
+			cfg:     config.MCPConfig{},
+			wantErr: "",
+		},
+		{
+			name:    "long_key_with_tls",
+			cfg:     config.MCPConfig{APIKey: longKey, TLSCert: "/x"},
+			wantErr: "",
+		},
+		{
+			name:     "long_key_no_tls_with_insecure",
+			cfg:      config.MCPConfig{APIKey: longKey},
+			insecure: true,
+			wantErr:  "",
+		},
+		{
+			name:    "long_key_no_tls_rejected",
+			cfg:     config.MCPConfig{APIKey: longKey},
+			wantErr: "API key auth requires TLS",
+		},
+		{
+			name:    "short_key_with_tls_rejected",
+			cfg:     config.MCPConfig{APIKey: shortKey, TLSCert: "/x"},
+			wantErr: "must be at least",
+		},
+		{
+			name:     "short_key_with_insecure_still_rejected",
+			cfg:      config.MCPConfig{APIKey: shortKey},
+			insecure: true,
+			wantErr:  "must be at least",
+		},
+		{
+			name:    "exactly_min_length_accepted",
+			cfg:     config.MCPConfig{APIKey: longKey, TLSCert: "/x"},
+			wantErr: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMCPHTTPConfig(tc.cfg, tc.insecure)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("expected nil error, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidateMCPHTTPConfig_TLSPrecedesLengthCheck pins the message
+// priority: when both checks would fail (short key, no TLS, no
+// --insecure), the TLS error is the one the user sees first. The
+// reasoning is that fixing TLS often involves regenerating the key
+// anyway, and "auth without TLS" is the louder operational concern.
+func TestValidateMCPHTTPConfig_TLSPrecedesLengthCheck(t *testing.T) {
+	cfg := config.MCPConfig{APIKey: "shortkey"} // no TLS, short key
+	err := validateMCPHTTPConfig(cfg, false)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "API key auth requires TLS") {
+		t.Errorf("expected TLS error first, got %q", err.Error())
+	}
+}
+
+func TestMCPGenKey_OutputsHexEncodedRandomKey(t *testing.T) {
+	// Capture the command's stdout via cobra's SetOut.
+	var buf bytes.Buffer
+	mcpGenKeyCmd.SetOut(&buf)
+	t.Cleanup(func() { mcpGenKeyCmd.SetOut(nil) })
+
+	if err := mcpGenKeyCmd.RunE(mcpGenKeyCmd, nil); err != nil {
+		t.Fatalf("gen-key: %v", err)
+	}
+
+	out := strings.TrimSpace(buf.String())
+	if len(out) != 64 {
+		t.Errorf("output length = %d, want 64 hex chars (32 bytes)", len(out))
+	}
+	if _, err := hex.DecodeString(out); err != nil {
+		t.Errorf("output is not valid hex: %v (got %q)", err, out)
+	}
+
+	// Comfortably above the production min-length check.
+	if len(out) < minAPIKeyLength {
+		t.Errorf("gen-key output (%d chars) is below minAPIKeyLength (%d) — gen-key must always produce a passing key",
+			len(out), minAPIKeyLength)
+	}
+}
+
+func TestMCPGenKey_ProducesDistinctKeys(t *testing.T) {
+	// crypto/rand should never produce two identical 32-byte sequences
+	// in a row. Pin it so a future refactor that accidentally seeds
+	// math/rand (or memoizes the output) is caught.
+	run := func(t *testing.T) string {
+		t.Helper()
+		var buf bytes.Buffer
+		mcpGenKeyCmd.SetOut(&buf)
+		if err := mcpGenKeyCmd.RunE(mcpGenKeyCmd, nil); err != nil {
+			t.Fatalf("gen-key: %v", err)
+		}
+		mcpGenKeyCmd.SetOut(nil)
+		return strings.TrimSpace(buf.String())
+	}
+	a, b := run(t), run(t)
+	if a == b {
+		t.Errorf("gen-key produced identical output on two calls: %q", a)
 	}
 }
 

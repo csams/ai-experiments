@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,10 +13,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/csams/todo/config"
 	todomcp "github.com/csams/todo/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
 )
+
+// minAPIKeyLength is the floor we enforce on cfg.MCP.APIKey when the
+// HTTP transport is in use. 20 ASCII characters carries ~119 bits of
+// entropy if generated from a typical random alphabet (more if hex);
+// well above any practical brute-force threshold and short enough that
+// a hand-typed key for a small private deployment isn't onerous.
+const minAPIKeyLength = 20
 
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
@@ -67,13 +77,12 @@ HTTP streamable transport (for remote / multi-client access).`,
 			}
 
 			insecure, _ := cmd.Flags().GetBool("insecure")
-			if cfg.MCP.APIKey != "" && cfg.MCP.TLSCert == "" && !insecure {
-				return fmt.Errorf("API key auth requires TLS (set tls_cert/tls_key in config or via TODO_MCP_TLS_CERT/TODO_MCP_TLS_KEY env vars, or use --insecure for development)")
+			if err := validateMCPHTTPConfig(cfg.MCP, insecure); err != nil {
+				return err
 			}
 			if cfg.MCP.APIKey != "" && cfg.MCP.TLSCert == "" && insecure {
 				logger.Warn("MCP API key auth enabled without TLS; tokens sent in cleartext (--insecure)")
 			}
-
 			if cfg.MCP.APIKey == "" {
 				logger.Warn("MCP HTTP server starting without authentication; all clients have full access")
 			}
@@ -137,6 +146,56 @@ HTTP streamable transport (for remote / multi-client access).`,
 	},
 }
 
+// validateMCPHTTPConfig enforces startup-time invariants on the HTTP
+// transport's config. Returns a non-nil error when the operator should
+// fix something before the server starts.
+//
+// Rules:
+//   - API key without TLS: refuse unless --insecure (developer override).
+//   - API key shorter than minAPIKeyLength: refuse regardless of
+//     --insecure. Weak credentials are weak credentials; the dev/prod
+//     transport choice is independent. Use `todo mcp gen-key` to
+//     generate a strong key.
+//
+// Warnings (cleartext-on-insecure, no-auth-at-all) live at the call
+// site so they fire after this check passes.
+func validateMCPHTTPConfig(c config.MCPConfig, insecure bool) error {
+	if c.APIKey == "" {
+		return nil
+	}
+	if c.TLSCert == "" && !insecure {
+		return fmt.Errorf("API key auth requires TLS (set tls_cert/tls_key in config or via TODO_MCP_TLS_CERT/TODO_MCP_TLS_KEY env vars, or use --insecure for development)")
+	}
+	if len(c.APIKey) < minAPIKeyLength {
+		return fmt.Errorf("MCP API key must be at least %d characters (got %d); generate a strong key with `todo mcp gen-key`",
+			minAPIKeyLength, len(c.APIKey))
+	}
+	return nil
+}
+
+// mcpGenKeyCmd prints a freshly-generated random API key suitable for
+// dropping into config (mcp.api_key) or the TODO_MCP_API_KEY env var.
+// 32 bytes of randomness rendered as hex = 64 characters of high-
+// entropy ASCII, comfortably above minAPIKeyLength.
+var mcpGenKeyCmd = &cobra.Command{
+	Use:   "gen-key",
+	Short: "Print a fresh 256-bit random API key (hex-encoded)",
+	Long: `Print a fresh 256-bit random API key.
+
+The output is 64 hex characters drawn from crypto/rand. Pipe it into
+your config or environment, e.g.
+
+    TODO_MCP_API_KEY=$(todo mcp gen-key) ./todo mcp --transport http`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		var key [32]byte
+		if _, err := rand.Read(key[:]); err != nil {
+			return fmt.Errorf("generate random key: %w", err)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), hex.EncodeToString(key[:]))
+		return nil
+	},
+}
+
 // bodySizeLimitMiddleware caps the request body to maxBytes. A maxBytes <= 0
 // disables the cap (matches the http.Server convention of "0 = unlimited").
 // When the limit is exceeded, downstream io.ReadAll returns *http.MaxBytesError,
@@ -181,5 +240,6 @@ func init() {
 	mcpCmd.Flags().String("transport", "", "transport: stdio (default) or http")
 	mcpCmd.Flags().String("addr", "", "listen address for HTTP transport (default from config)")
 	mcpCmd.Flags().Bool("insecure", false, "allow API key auth without TLS (development only)")
+	mcpCmd.AddCommand(mcpGenKeyCmd)
 	rootCmd.AddCommand(mcpCmd)
 }

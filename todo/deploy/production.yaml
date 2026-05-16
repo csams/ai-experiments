@@ -37,7 +37,8 @@ logging:
 mcp:
   transport: http
   addr: ":8080"
-  api_key: ""    # injected via TODO_MCP_API_KEY env var; do NOT put keys here
+  api_key: ""    # injected via TODO_MCP_API_KEY env var; do NOT put keys here.
+                 # Must be at least 20 characters when set. Generate one with `todo mcp gen-key`.
   tls_cert: /etc/todo/certs/mcp/server.crt
   tls_key: /etc/todo/certs/mcp/server.key
   # HTTP transport hardening. Defaults applied when omitted.
