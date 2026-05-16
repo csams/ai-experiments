@@ -79,6 +79,17 @@ func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32,
 }
 
 func (e *Embedder) doEmbed(ctx context.Context, input any) ([][]float32, error) {
+	// Capture the expected response count up front so we can match
+	// the API's `data` slice length against it after decoding. Without
+	// this, a short response silently returns a too-short [][]float32
+	// and the upstream caller surfaces a generic
+	// "embedding count mismatch" — fine but the failure is harder to
+	// debug from the receiver's side.
+	expected, err := openaiInputCount(input)
+	if err != nil {
+		return nil, err
+	}
+
 	body, err := json.Marshal(embeddingRequest{Model: e.model, Input: input})
 	if err != nil {
 		return nil, err
@@ -107,10 +118,15 @@ func (e *Embedder) doEmbed(ctx context.Context, input any) ([][]float32, error) 
 		return nil, fmt.Errorf("openai decode: %w", err)
 	}
 
-	vecs := make([][]float32, len(result.Data))
+	if len(result.Data) != expected {
+		return nil, fmt.Errorf("openai returned %d embeddings for a batch of %d (expected counts to match)",
+			len(result.Data), expected)
+	}
+
+	vecs := make([][]float32, expected)
 	for _, d := range result.Data {
-		if d.Index < 0 || d.Index >= len(vecs) {
-			return nil, fmt.Errorf("openai returned invalid embedding index %d for batch of %d", d.Index, len(vecs))
+		if d.Index < 0 || d.Index >= expected {
+			return nil, fmt.Errorf("openai returned invalid embedding index %d for batch of %d", d.Index, expected)
 		}
 		if vecs[d.Index] != nil {
 			return nil, fmt.Errorf("openai returned duplicate embedding index %d", d.Index)
@@ -118,6 +134,21 @@ func (e *Embedder) doEmbed(ctx context.Context, input any) ([][]float32, error) 
 		vecs[d.Index] = d.Embedding
 	}
 	return vecs, nil
+}
+
+// openaiInputCount reports how many embedding rows the API should
+// return for the given input. The OpenAI API accepts a single string
+// or an array of strings; anything else here is a caller bug — we
+// surface it with a clear error rather than reaching the network.
+func openaiInputCount(input any) (int, error) {
+	switch v := input.(type) {
+	case string:
+		return 1, nil
+	case []string:
+		return len(v), nil
+	default:
+		return 0, fmt.Errorf("openai embedder: unsupported input type %T (expected string or []string)", input)
+	}
 }
 
 func (e *Embedder) Dimensions() int {
