@@ -61,8 +61,7 @@ var taskCreateCmd = &cobra.Command{
 			return err
 		}
 
-		outputTask(task)
-		return nil
+		return outputTask(task)
 	},
 }
 

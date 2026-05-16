@@ -27,8 +27,7 @@ var taskShowCmd = &cobra.Command{
 			return err
 		}
 
-		outputTaskDetail(detail)
-		return nil
+		return outputTaskDetail(detail)
 	},
 }
 

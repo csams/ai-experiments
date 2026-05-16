@@ -50,8 +50,7 @@ var taskUpdateCmd = &cobra.Command{
 			return err
 		}
 
-		outputTaskUpdated(task)
-		return nil
+		return outputTaskUpdated(task)
 	},
 }
 

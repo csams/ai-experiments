@@ -41,7 +41,9 @@ var taskGetManyCmd = &cobra.Command{
 			if i > 0 {
 				fmt.Println()
 			}
-			outputTaskDetail(&result.Tasks[i])
+			if err := outputTaskDetail(&result.Tasks[i]); err != nil {
+				return err
+			}
 		}
 		if len(result.NotFound) > 0 {
 			parts := make([]string, len(result.NotFound))

@@ -96,8 +96,7 @@ var taskListCmd = &cobra.Command{
 			return err
 		}
 
-		outputTaskList(tasks)
-		return nil
+		return outputTaskList(tasks)
 	},
 }
 

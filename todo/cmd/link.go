@@ -140,8 +140,7 @@ var linkListCmd = &cobra.Command{
 			return err
 		}
 
-		outputLinks(links)
-		return nil
+		return outputLinks(links)
 	},
 }
 

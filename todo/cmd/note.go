@@ -147,8 +147,7 @@ var noteListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		outputNotes(notes)
-		return nil
+		return outputNotes(notes)
 	},
 }
 
@@ -241,8 +240,7 @@ var noteSearchCmd = &cobra.Command{
 			return err
 		}
 
-		outputNotes(notes)
-		return nil
+		return outputNotes(notes)
 	},
 }
 

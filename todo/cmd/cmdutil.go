@@ -40,32 +40,37 @@ func outputJSON(v any) error {
 }
 
 // outputTask prints a task in human-readable format.
-func outputTask(task *model.Task) {
+//
+// All output helpers in this file return error so the RunE caller can
+// surface a broken-pipe or stdout-close as a non-zero process exit
+// instead of silently swallowing it. Text-mode helpers still write
+// directly to os.Stdout (where a broken pipe surfaces only on the next
+// write); the JSON path returns the encoder error verbatim.
+func outputTask(task *model.Task) error {
 	if jsonOutput {
-		outputJSON(task)
-		return
+		return outputJSON(task)
 	}
-	fmt.Printf("Created task %d\n", task.ID)
+	_, err := fmt.Printf("Created task %d\n", task.ID)
+	return err
 }
 
 // outputTaskUpdated prints a brief update confirmation.
-func outputTaskUpdated(task *model.Task) {
+func outputTaskUpdated(task *model.Task) error {
 	if jsonOutput {
-		outputJSON(task)
-		return
+		return outputJSON(task)
 	}
-	fmt.Printf("Updated task %d\n", task.ID)
+	_, err := fmt.Printf("Updated task %d\n", task.ID)
+	return err
 }
 
 // outputTaskList prints a list of tasks as a table.
-func outputTaskList(tasks []model.TaskListItem) {
+func outputTaskList(tasks []model.TaskListItem) error {
 	if jsonOutput {
-		outputJSON(tasks)
-		return
+		return outputJSON(tasks)
 	}
 	if len(tasks) == 0 {
-		fmt.Println("No tasks found.")
-		return
+		_, err := fmt.Println("No tasks found.")
+		return err
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -95,14 +100,13 @@ func outputTaskList(tasks []model.TaskListItem) {
 		fmt.Fprintf(w, "%d\t%d\t%s%s\t%s\t%s\t%s\t%s\t%s\n",
 			t.ID, t.Priority, t.State, archived, due, parent, chk, title, tags)
 	}
-	w.Flush()
+	return w.Flush()
 }
 
 // outputTaskDetail prints a full task detail view.
-func outputTaskDetail(detail *model.TaskDetail) {
+func outputTaskDetail(detail *model.TaskDetail) error {
 	if jsonOutput {
-		outputJSON(detail)
-		return
+		return outputJSON(detail)
 	}
 
 	t := detail.Task
@@ -173,17 +177,17 @@ func outputTaskDetail(detail *model.TaskDetail) {
 			fmt.Printf("    #%d (%s): %s\n", n.ID, n.CreatedAt.Format("2006-01-02"), truncate(n.Text, 100))
 		}
 	}
+	return nil
 }
 
 // outputNotes prints a list of notes.
-func outputNotes(notes []model.Note) {
+func outputNotes(notes []model.Note) error {
 	if jsonOutput {
-		outputJSON(notes)
-		return
+		return outputJSON(notes)
 	}
 	if len(notes) == 0 {
-		fmt.Println("No notes found.")
-		return
+		_, err := fmt.Println("No notes found.")
+		return err
 	}
 	for _, n := range notes {
 		parent := "standalone"
@@ -196,17 +200,17 @@ func outputNotes(notes []model.Note) {
 		}
 		fmt.Printf("#%d (%s, %s)%s: %s\n", n.ID, parent, n.CreatedAt.Format("2006-01-02"), archived, n.Text)
 	}
+	return nil
 }
 
 // outputLinks prints a list of links.
-func outputLinks(links []model.Link) {
+func outputLinks(links []model.Link) error {
 	if jsonOutput {
-		outputJSON(links)
-		return
+		return outputJSON(links)
 	}
 	if len(links) == 0 {
-		fmt.Println("No links found.")
-		return
+		_, err := fmt.Println("No links found.")
+		return err
 	}
 	for _, l := range links {
 		if l.Description != "" {
@@ -215,6 +219,7 @@ func outputLinks(links []model.Link) {
 			fmt.Printf("#%d [%s] %s\n", l.ID, l.Type, l.URL)
 		}
 	}
+	return nil
 }
 
 func tagNames(tags []model.TaskTag) string {

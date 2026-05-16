@@ -25,8 +25,7 @@ var taskSearchCmd = &cobra.Command{
 		for i := range tasks {
 			items[i] = model.TaskListItem{Task: tasks[i]}
 		}
-		outputTaskList(items)
-		return nil
+		return outputTaskList(items)
 	},
 }
 

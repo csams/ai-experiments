@@ -51,8 +51,7 @@ var searchSemanticCmd = &cobra.Command{
 			return err
 		}
 
-		outputSemanticResults(results)
-		return nil
+		return outputSemanticResults(results)
 	},
 }
 
@@ -90,19 +89,17 @@ var searchContextCmd = &cobra.Command{
 			return err
 		}
 
-		outputSemanticResults(results)
-		return nil
+		return outputSemanticResults(results)
 	},
 }
 
-func outputSemanticResults(results []store.SemanticSearchResult) {
+func outputSemanticResults(results []store.SemanticSearchResult) error {
 	if jsonOutput {
-		outputJSON(results)
-		return
+		return outputJSON(results)
 	}
 	if len(results) == 0 {
-		fmt.Println("No results found.")
-		return
+		_, err := fmt.Println("No results found.")
+		return err
 	}
 	for _, r := range results {
 		docType := "?"
@@ -114,6 +111,7 @@ func outputSemanticResults(results []store.SemanticSearchResult) {
 			fmt.Printf("    [chunk %d, %.3f] %s\n", c.ChunkIndex, c.Score, truncate(c.Text, 100))
 		}
 	}
+	return nil
 }
 
 func init() {
