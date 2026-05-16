@@ -114,7 +114,7 @@ var noteUpdateCmd = &cobra.Command{
 
 var noteListCmd = &cobra.Command{
 	Use:   "list [task-id]",
-	Short: "List notes (no args: all; --standalone: only standalone; <task-id>: that task's notes). Archived notes are excluded unless --include-archived is set.",
+	Short: "List notes (no args: all; --standalone or --attached to narrow; <task-id>: that task's notes). Archived notes excluded unless --include-archived is set.",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, _, err := openStore()
@@ -123,9 +123,22 @@ var noteListCmd = &cobra.Command{
 		}
 		defer s.Close(cmd.Context())
 
-		all, _ := cmd.Flags().GetBool("all")
 		standalone, _ := cmd.Flags().GetBool("standalone")
+		attached, _ := cmd.Flags().GetBool("attached")
 		includeArchived, _ := cmd.Flags().GetBool("include-archived")
+
+		if standalone && attached {
+			return fmt.Errorf("--standalone and --attached are mutually exclusive")
+		}
+		// A scope-narrowing flag with a task-id positional is incoherent
+		// (positional already restricts to that task's notes, which are
+		// neither "all" nor "standalone" nor "attached" in the scope
+		// sense — they're just "this task's"). Pre-PR-21 this silently
+		// ignored the flag; reject it explicitly now that we have two
+		// scope flags and the surprise is more visible.
+		if len(args) == 1 && (standalone || attached) {
+			return fmt.Errorf("task-id positional and --standalone/--attached are mutually exclusive (the positional already scopes to one task's notes)")
+		}
 
 		opts := store.ListNotesOptions{IncludeArchived: includeArchived}
 		switch {
@@ -137,10 +150,11 @@ var noteListCmd = &cobra.Command{
 			opts.TaskID = &taskID
 		case standalone:
 			opts.Scope = store.NoteScopeStandalone
-		case all:
-			opts.Scope = store.NoteScopeAll
+		case attached:
+			opts.Scope = store.NoteScopeAttached
 		default:
-			// No positional, no flag: list everything (least surprising default).
+			// No positional, no scope flag: list everything. Matches the
+			// MCP `scope: "all"` default and the prior implicit behavior.
 			opts.Scope = store.NoteScopeAll
 		}
 		notes, err := s.ListNotes(cmd.Context(), opts)
@@ -253,9 +267,16 @@ func init() {
 	noteUpdateCmd.Flags().Bool("archive", false, "set archived=true")
 	noteUpdateCmd.Flags().Bool("unarchive", false, "set archived=false")
 
-	noteListCmd.Flags().Bool("all", false, "list every note (attached + standalone)")
 	noteListCmd.Flags().Bool("standalone", false, "list only standalone notes")
+	noteListCmd.Flags().Bool("attached", false, "list only notes attached to a task")
 	noteListCmd.Flags().Bool("include-archived", false, "include archived notes in results (default: false)")
+	// --all has always done what the default does — list every note —
+	// which made it redundant. Keep the flag for one release so scripts
+	// don't break overnight; cobra prints a deprecation notice to stderr
+	// when it's used. Remove after one release.
+	noteListCmd.Flags().Bool("all", false, "deprecated; no-op (the default already lists every note)")
+	_ = noteListCmd.Flags().MarkDeprecated("all",
+		"flag has no effect; omit it (the default already lists every note). Use --standalone or --attached to narrow.")
 
 	noteSearchCmd.Flags().Bool("include-archived", false, "include archived notes in results (default: false)")
 
