@@ -125,7 +125,10 @@ func openStore() (store.Store, *gormstore.GormStore, error) {
 
 	// Register audit logger if enabled
 	if cfg.Logging.Audit {
-		gs.AddObserver(audit.NewLogger(logger))
+		gs.AddObserver(audit.NewLogger(logger, audit.Options{
+			ValueCap:   cfg.Logging.AuditValueCap,
+			FullValues: cfg.Logging.AuditFullValues,
+		}))
 	}
 
 	// Setup vector sync if enabled and not disabled

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -150,11 +151,25 @@ func bodySizeLimitMiddleware(maxBytes int64, next http.Handler) http.Handler {
 	})
 }
 
+// bearerAuthMiddleware checks the Authorization header against the
+// configured API key in constant time.
+//
+// We hash both sides with SHA-256 before comparison. The plain
+// subtle.ConstantTimeCompare form returns 0 immediately when the input
+// lengths differ — that bypass short-circuits the constant-time
+// guarantee and leaks the expected length (i.e. the API key length plus
+// 7 for "Bearer "). Hashing first equalizes the lengths so the timing
+// of the compare depends only on the hash output, not the input shape.
+//
+// SHA-256 is the right primitive here because the API key is
+// high-entropy (the gen-key path produces 256-bit random tokens). A
+// password hash (bcrypt/argon2) would be wrong: it's optimized for
+// stretching low-entropy passwords, not for one-shot equality checks.
 func bearerAuthMiddleware(apiKey string, next http.Handler) http.Handler {
-	expected := []byte("Bearer " + apiKey)
+	wantSum := sha256.Sum256([]byte("Bearer " + apiKey))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := []byte(r.Header.Get("Authorization"))
-		if subtle.ConstantTimeCompare(auth, expected) != 1 {
+		gotSum := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		if subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

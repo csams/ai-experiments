@@ -26,6 +26,13 @@ logging:
   format: json
   output: stderr
   audit: true
+  # Per-string-value cap for Change.old/new in audit records. 256 is
+  # plenty for state transitions and short edits; long description /
+  # checkpoint diffs get truncated with an elision marker showing how
+  # many runes were dropped. Set audit_full_values: true to disable
+  # truncation entirely.
+  audit_value_cap: 256
+  audit_full_values: false
 
 mcp:
   transport: http

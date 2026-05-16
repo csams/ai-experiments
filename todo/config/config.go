@@ -2,18 +2,63 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/spf13/viper"
 )
 
+// Mask is the redaction marker substituted for sensitive fields in
+// String / LogValue output. Centralized so tests can pin the literal
+// without scattering "***" across the codebase.
+const Mask = "***"
+
 type Config struct {
-	DB      DBConfig      `yaml:"db" mapstructure:"db"`
-	Vector  VectorConfig  `yaml:"vector" mapstructure:"vector"`
-	Logging LogConfig     `yaml:"logging" mapstructure:"logging"`
-	MCP     MCPConfig     `yaml:"mcp" mapstructure:"mcp"`
+	DB      DBConfig     `yaml:"db" mapstructure:"db"`
+	Vector  VectorConfig `yaml:"vector" mapstructure:"vector"`
+	Logging LogConfig    `yaml:"logging" mapstructure:"logging"`
+	MCP     MCPConfig    `yaml:"mcp" mapstructure:"mcp"`
 }
+
+// String renders the config in a form safe to log: sensitive fields
+// (`db.postgres.password`, `mcp.api_key`) are masked. Implemented by
+// formatting a `shadowConfig` type so we don't re-enter this method
+// recursively. Nested struct fields whose types have their own Stringer
+// (PostgresConfig, MCPConfig) still get their masked output because
+// %+v honors Stringer on field values.
+//
+// Why this exists: every other field gets its zero-effort `%+v` dump
+// from fmt's reflection, but a stray `log.Printf("%+v", cfg)` or a
+// debugger snapshot would otherwise leak the DB password and MCP API
+// key. Stringer + LogValuer close that gap whether the caller uses fmt
+// or slog.
+//
+// IMPORTANT: this method relies on field-level Stringers to mask. If
+// you add a sensitive field directly on Config (not nested under a
+// type with its own masking Stringer), it will leak through the
+// reflection walk in the shadowConfig formatter. Sensitive fields
+// must live on a nested type that masks itself in its own String().
+//
+// Note: fmt verbs that bypass Stringer (`%#v` / GoStringer) are NOT
+// masked — those verbs are debug-only and not used by slog or any
+// logging path in this codebase. If that ever changes, add a
+// GoString() method too.
+func (c Config) String() string {
+	return fmt.Sprintf("%+v", shadowConfig(c))
+}
+
+// LogValue routes slog through the same masked rendering used by
+// fmt — both handlers (text and JSON) end up storing the redacted
+// string instead of recursing into the struct fields. Keeps the
+// implementation single-sourced.
+func (c Config) LogValue() slog.Value {
+	return slog.StringValue(c.String())
+}
+
+// shadowConfig has the same fields as Config but no methods, so
+// formatting it doesn't recurse into our String/LogValue.
+type shadowConfig Config
 
 type DBConfig struct {
 	Driver   string         `yaml:"driver" mapstructure:"driver"`
@@ -63,7 +108,7 @@ func quoteLibpq(s string) string {
 
 // String returns the DSN with the password masked, suitable for logging.
 func (p PostgresConfig) String() string {
-	masked := "***"
+	masked := Mask
 	if p.Password == "" {
 		masked = ""
 	}
@@ -83,6 +128,11 @@ func (p PostgresConfig) String() string {
 		}
 	}
 	return s
+}
+
+// LogValue mirrors String for slog. Returns the same masked DSN string.
+func (p PostgresConfig) LogValue() slog.Value {
+	return slog.StringValue(p.String())
 }
 
 type VectorConfig struct {
@@ -119,6 +169,20 @@ type LogConfig struct {
 	Format string `yaml:"format" mapstructure:"format"`
 	Output string `yaml:"output" mapstructure:"output"`
 	Audit  bool   `yaml:"audit" mapstructure:"audit"`
+
+	// AuditValueCap is the per-string-value rune cap applied to
+	// Change.Old / Change.New entries in audit log records. 0 falls
+	// back to audit.DefaultValueCap (256). Has no effect when
+	// AuditFullValues is true. Non-string values (ints, due-date
+	// pointers, task ID slices) pass through regardless of this cap.
+	AuditValueCap int `yaml:"audit_value_cap" mapstructure:"audit_value_cap"`
+
+	// AuditFullValues disables truncation entirely. Off by default —
+	// audit logs capture structural changes (state, priority, IDs)
+	// plus truncated previews of free-text fields. Set true if the
+	// audit log is your source of truth for content changes and you
+	// accept multi-MB log lines for large description edits.
+	AuditFullValues bool `yaml:"audit_full_values" mapstructure:"audit_full_values"`
 }
 
 type MCPConfig struct {
@@ -148,6 +212,26 @@ type MCPConfig struct {
 	WriteTimeout time.Duration `yaml:"write_timeout" mapstructure:"write_timeout"`
 }
 
+// String returns the config with APIKey masked, suitable for logging.
+// Adding a new sensitive field to MCPConfig requires updating this
+// method (mask the field on the shadow before formatting).
+func (m MCPConfig) String() string {
+	masked := shadowMCP(m)
+	if masked.APIKey != "" {
+		masked.APIKey = Mask
+	}
+	return fmt.Sprintf("%+v", masked)
+}
+
+// LogValue mirrors String for slog.
+func (m MCPConfig) LogValue() slog.Value {
+	return slog.StringValue(m.String())
+}
+
+// shadowMCP exists so MCPConfig.String can fmt.%+v without re-entering
+// itself via the Stringer method set.
+type shadowMCP MCPConfig
+
 // Load reads config from a YAML file, environment variables, and applies defaults.
 // configPath may be empty to use the default path (~/.todo.yaml).
 func Load(configPath string) (*Config, error) {
@@ -175,6 +259,8 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("logging.format", "json")
 	v.SetDefault("logging.output", "stderr")
 	v.SetDefault("logging.audit", true)
+	v.SetDefault("logging.audit_value_cap", 256)
+	v.SetDefault("logging.audit_full_values", false)
 
 	v.SetDefault("mcp.transport", "stdio")
 	v.SetDefault("mcp.addr", ":8080")
