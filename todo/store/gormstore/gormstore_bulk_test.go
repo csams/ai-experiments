@@ -322,3 +322,286 @@ func TestBulkRemoveTags_NonexistentTagSucceeds(t *testing.T) {
 		t.Fatalf("expected no error removing nonexistent tag, got %v", err)
 	}
 }
+
+// --- PR-13/14: input-order events, no caller-slice mutation ---
+
+// TestBulk_DoesNotMutateCallerSlice pins the no-mutation invariant across
+// every bulk method. BulkUpdateState's internal sort previously reached
+// into the caller's slice and reordered it; that's now done on a private
+// copy. The other bulk paths never sorted but used to share their slice
+// with the emitted event — that's also fixed (see EventCopy tests).
+func TestBulk_DoesNotMutateCallerSlice(t *testing.T) {
+	s := newTestStore(t)
+	// Three tasks so a sort actually reorders something.
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C"})
+
+	assertUnchanged := func(name string, got, want []uint) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Errorf("%s: len changed %d -> %d", name, len(want), len(got))
+			return
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("%s: ids[%d] changed %d -> %d (caller slice mutated)", name, i, want[i], got[i])
+			}
+		}
+	}
+
+	run := func(name string, op func(ids []uint) error) {
+		ids := []uint{c.ID, a.ID, b.ID} // intentionally non-sorted
+		original := append([]uint(nil), ids...)
+		if err := op(ids); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		assertUnchanged(name, ids, original)
+	}
+
+	run("BulkUpdateState", func(ids []uint) error {
+		_, err := s.BulkUpdateState(ctx(), ids, model.StateProgressing, store.SetTaskStateOptions{})
+		return err
+	})
+	run("BulkUpdatePriority", func(ids []uint) error {
+		_, err := s.BulkUpdatePriority(ctx(), ids, 1)
+		return err
+	})
+	run("BulkAddTags", func(ids []uint) error {
+		return s.BulkAddTags(ctx(), ids, []string{"x", "y"})
+	})
+	run("BulkRemoveTags", func(ids []uint) error {
+		return s.BulkRemoveTags(ctx(), ids, []string{"x", "y"})
+	})
+}
+
+// TestBulkUpdateState_EmitsInputOrderPlusExtras pins the audit-event
+// convention: the emitted TaskIDs match the caller's input order, with
+// any side-effect IDs (auto-Unblocked dependents from a Done cascade)
+// appended after.
+func TestBulkUpdateState_EmitsInputOrderPlusExtras(t *testing.T) {
+	s := newTestStore(t)
+	obs := &recordingObserver{}
+	s.AddObserver(obs)
+
+	// Inputs in non-ascending order so a sort would reshuffle them.
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C"})
+	input := []uint{c.ID, a.ID, b.ID}
+
+	if _, err := s.BulkUpdateState(ctx(), input, model.StateProgressing, store.SetTaskStateOptions{}); err != nil {
+		t.Fatalf("bulk update: %v", err)
+	}
+
+	// Find the bulk_state_changed event.
+	var got []uint
+	for _, e := range obs.events {
+		if e.Type == "task.bulk_state_changed" {
+			got = e.TaskIDs
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("task.bulk_state_changed event not emitted")
+	}
+	if len(got) != len(input) {
+		t.Fatalf("event len = %d, want %d (no extras expected on Progressing transition)", len(got), len(input))
+	}
+	for i := range got {
+		if got[i] != input[i] {
+			t.Errorf("event TaskIDs[%d] = %d, want %d (input order preserved)", i, got[i], input[i])
+		}
+	}
+}
+
+// TestBulkUpdateState_EventCopyIndependentOfCallerSlice — the emitted
+// event must hold its own copy, so a caller that mutates `ids` after
+// the call can't reach into the audit log.
+func TestBulkUpdateState_EventCopyIndependentOfCallerSlice(t *testing.T) {
+	s := newTestStore(t)
+	obs := &recordingObserver{}
+	s.AddObserver(obs)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C"})
+
+	// Non-sorted input so any accidental aliasing through
+	// `inputIDs := ids[:0:0]` + append (which would share storage when
+	// the allocator can extend in place) would surface in the assertion.
+	ids := []uint{c.ID, a.ID, b.ID}
+	if _, err := s.BulkUpdateState(ctx(), ids, model.StateProgressing, store.SetTaskStateOptions{}); err != nil {
+		t.Fatalf("bulk update: %v", err)
+	}
+
+	// Mutate ids post-call.
+	ids[0] = 99999
+
+	var evt store.StoreEvent
+	for _, e := range obs.events {
+		if e.Type == "task.bulk_state_changed" {
+			evt = e
+		}
+	}
+	if evt.TaskIDs[0] == 99999 {
+		t.Error("event TaskIDs shares storage with caller slice (mutation visible in audit log)")
+	}
+}
+
+// TestBulkUpdateState_DoneCascadeEventOrder pins the "extras appended
+// after" half of the input-order convention: a Done transition on a
+// blocker auto-Unblocks its dependent. The emitted event must carry
+// the input IDs verbatim (caller order) followed by the dependent's
+// ID at the end.
+func TestBulkUpdateState_DoneCascadeEventOrder(t *testing.T) {
+	s := newTestStore(t)
+
+	// Three blockers, intentionally created in non-ascending order so
+	// the input slice is unsorted and a leaked internal sort would be
+	// detectable in the assertion.
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C-blocker"})
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A-blocker"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B-blocker"})
+
+	// Dependent task blocked by ALL three. Completing all three at once
+	// triggers a single auto-Unblocked transition for the dependent.
+	dep, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "dependent"})
+	if _, err := s.AddBlockers(ctx(), dep.ID, []uint{a.ID, b.ID, c.ID}); err != nil {
+		t.Fatalf("setup AddBlockers: %v", err)
+	}
+
+	// Attach observer AFTER setup so the event slice only contains the
+	// bulk call's emissions.
+	obs := &recordingObserver{}
+	s.AddObserver(obs)
+
+	input := []uint{c.ID, a.ID, b.ID}
+	if _, err := s.BulkUpdateState(ctx(), input, model.StateDone, store.SetTaskStateOptions{}); err != nil {
+		t.Fatalf("bulk done: %v", err)
+	}
+
+	// Find the bulk_state_changed event.
+	var got []uint
+	for _, e := range obs.events {
+		if e.Type == "task.bulk_state_changed" {
+			got = e.TaskIDs
+		}
+	}
+	if got == nil {
+		t.Fatal("task.bulk_state_changed not emitted")
+	}
+
+	// Leading prefix matches caller order verbatim.
+	if len(got) < len(input) {
+		t.Fatalf("event len = %d, want >= %d (input + extras)", len(got), len(input))
+	}
+	for i := range input {
+		if got[i] != input[i] {
+			t.Errorf("event TaskIDs[%d] = %d, want %d (input prefix must match caller order verbatim)", i, got[i], input[i])
+		}
+	}
+
+	// Trailing extras contain the dependent's ID.
+	extras := got[len(input):]
+	foundDep := false
+	for _, id := range extras {
+		if id == dep.ID {
+			foundDep = true
+		}
+	}
+	if !foundDep {
+		t.Errorf("auto-Unblocked dependent %d not in event extras: %v", dep.ID, extras)
+	}
+}
+
+// TestBulkUpdatePriority_EmitsInputOrder mirrors the input-order check
+// for the priority path.
+func TestBulkUpdatePriority_EmitsInputOrder(t *testing.T) {
+	s := newTestStore(t)
+	obs := &recordingObserver{}
+	s.AddObserver(obs)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C"})
+	input := []uint{c.ID, a.ID, b.ID}
+
+	if _, err := s.BulkUpdatePriority(ctx(), input, 2); err != nil {
+		t.Fatalf("bulk priority: %v", err)
+	}
+
+	var got []uint
+	for _, e := range obs.events {
+		if e.Type == "task.bulk_priority_changed" {
+			got = e.TaskIDs
+		}
+	}
+	if got == nil {
+		t.Fatal("task.bulk_priority_changed not emitted")
+	}
+	for i := range got {
+		if got[i] != input[i] {
+			t.Errorf("event TaskIDs[%d] = %d, want %d (input order)", i, got[i], input[i])
+		}
+	}
+}
+
+// TestBulkAddTags_EmitsInputOrder and the Remove twin — confirm both
+// tag-bulk paths use input order too.
+func TestBulkAddTags_EmitsInputOrder(t *testing.T) {
+	s := newTestStore(t)
+	obs := &recordingObserver{}
+	s.AddObserver(obs)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A"})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B"})
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C"})
+	input := []uint{c.ID, a.ID, b.ID}
+
+	if err := s.BulkAddTags(ctx(), input, []string{"x"}); err != nil {
+		t.Fatalf("bulk add tags: %v", err)
+	}
+
+	var got []uint
+	for _, e := range obs.events {
+		if e.Type == "task.tags_changed" {
+			got = e.TaskIDs
+		}
+	}
+	if got == nil {
+		t.Fatal("task.tags_changed not emitted")
+	}
+	for i := range got {
+		if got[i] != input[i] {
+			t.Errorf("event TaskIDs[%d] = %d, want %d (input order)", i, got[i], input[i])
+		}
+	}
+}
+
+func TestBulkRemoveTags_EmitsInputOrder(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "A", Tags: []string{"x"}})
+	b, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "B", Tags: []string{"x"}})
+	c, _ := s.CreateTask(ctx(), store.CreateTaskOptions{Title: "C", Tags: []string{"x"}})
+
+	obs := &recordingObserver{}
+	s.AddObserver(obs)
+	input := []uint{c.ID, a.ID, b.ID}
+
+	if err := s.BulkRemoveTags(ctx(), input, []string{"x"}); err != nil {
+		t.Fatalf("bulk remove tags: %v", err)
+	}
+
+	var got []uint
+	for _, e := range obs.events {
+		if e.Type == "task.tags_changed" {
+			got = e.TaskIDs
+		}
+	}
+	if got == nil {
+		t.Fatal("task.tags_changed not emitted")
+	}
+	for i := range got {
+		if got[i] != input[i] {
+			t.Errorf("event TaskIDs[%d] = %d, want %d (input order)", i, got[i], input[i])
+		}
+	}
+}

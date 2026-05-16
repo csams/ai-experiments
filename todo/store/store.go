@@ -60,6 +60,15 @@ type Store interface {
 	SearchTasks(ctx context.Context, query string) ([]model.Task, error)
 
 	// Bulk operations (max 100 IDs per call)
+	//
+	// Convention: bulk methods do NOT mutate the caller's `ids` slice.
+	// Internal sorting (used by BulkUpdateState for deterministic per-row
+	// processing) operates on a private copy. Audit events emitted by
+	// bulk methods report task IDs in the caller's input order — matching
+	// the convention used by GetTasks reads — with any side-effect IDs
+	// (e.g. auto-Unblocked dependents from a Done cascade) appended
+	// after.
+	//
 	// BulkUpdateState applies the same SetTaskState semantics across the array
 	// in one transaction (see SetTaskState for the blocker-handling rules,
 	// including ForceClearBlockers). A single rejected task aborts the whole

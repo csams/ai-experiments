@@ -2024,15 +2024,27 @@ func (s *GormStore) BulkUpdateState(ctx context.Context, ids []uint, state model
 		return nil, &model.ValidationError{Field: "state", Message: "invalid state"}
 	}
 
-	// Process in ascending ID order
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	// Don't mutate the caller's slice. Keep two views:
+	//  - inputIDs: caller order, used for the audit event payload.
+	//  - sortedIDs: ascending, used only for deterministic per-row work
+	//    inside the transaction.
+	inputIDs := make([]uint, len(ids))
+	copy(inputIDs, ids)
+	sortedIDs := make([]uint, len(ids))
+	copy(sortedIDs, ids)
+	sort.Slice(sortedIDs, func(i, j int) bool { return sortedIDs[i] < sortedIDs[j] })
 
 	db := s.db.WithContext(ctx)
 	var results []model.Task
-	affectedIDs := make([]uint, len(ids))
-	copy(affectedIDs, ids)
+	// affectedIDs starts as the caller's input order and grows by any
+	// auto-Unblocked dependents the Done cascade discovers. Reporting
+	// the input order matches the convention used by GetTasks (and
+	// avoids the surprising sort-by-ID reshuffle the audit log used
+	// to carry).
+	affectedIDs := make([]uint, len(inputIDs))
+	copy(affectedIDs, inputIDs)
 	err := db.Transaction(func(tx *gorm.DB) error {
-		for _, id := range ids {
+		for _, id := range sortedIDs {
 			if err := validateID(id); err != nil {
 				return err
 			}
@@ -2080,6 +2092,12 @@ func (s *GormStore) BulkUpdatePriority(ctx context.Context, ids []uint, priority
 		return nil, &model.ValidationError{Field: "ids", Message: fmt.Sprintf("max %d IDs per call", maxBulkIDs)}
 	}
 
+	// Snapshot for the audit event so a later caller mutation cannot
+	// reach into the emitted payload. Iteration order matches caller
+	// order; reporting order does too.
+	inputIDs := make([]uint, len(ids))
+	copy(inputIDs, ids)
+
 	db := s.db.WithContext(ctx)
 	var results []model.Task
 	err := db.Transaction(func(tx *gorm.DB) error {
@@ -2121,7 +2139,7 @@ func (s *GormStore) BulkUpdatePriority(ctx context.Context, ids []uint, priority
 
 	s.emit(ctx, store.StoreEvent{
 		Type:    "task.bulk_priority_changed",
-		TaskIDs: ids,
+		TaskIDs: inputIDs,
 	})
 
 	return results, nil
@@ -2135,6 +2153,10 @@ func (s *GormStore) BulkAddTags(ctx context.Context, ids []uint, tags []string) 
 	if tags, err = validateTags(tags); err != nil {
 		return err
 	}
+
+	// See BulkUpdatePriority — snapshot for the audit event.
+	inputIDs := make([]uint, len(ids))
+	copy(inputIDs, ids)
 
 	db := s.db.WithContext(ctx)
 	err = db.Transaction(func(tx *gorm.DB) error {
@@ -2170,7 +2192,7 @@ func (s *GormStore) BulkAddTags(ctx context.Context, ids []uint, tags []string) 
 
 	s.emit(ctx, store.StoreEvent{
 		Type:    "task.tags_changed",
-		TaskIDs: ids,
+		TaskIDs: inputIDs,
 	})
 
 	return nil
@@ -2184,6 +2206,10 @@ func (s *GormStore) BulkRemoveTags(ctx context.Context, ids []uint, tags []strin
 	if tags, err = validateTags(tags); err != nil {
 		return err
 	}
+
+	// See BulkUpdatePriority — snapshot for the audit event.
+	inputIDs := make([]uint, len(ids))
+	copy(inputIDs, ids)
 
 	db := s.db.WithContext(ctx)
 	err = db.Transaction(func(tx *gorm.DB) error {
@@ -2208,7 +2234,7 @@ func (s *GormStore) BulkRemoveTags(ctx context.Context, ids []uint, tags []strin
 
 	s.emit(ctx, store.StoreEvent{
 		Type:    "task.tags_changed",
-		TaskIDs: ids,
+		TaskIDs: inputIDs,
 	})
 
 	return nil
