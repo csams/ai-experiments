@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/csams/todo/embed"
 	"github.com/csams/todo/embed/chunker"
@@ -29,6 +30,14 @@ type VectorSyncer struct {
 	embedder embed.Embedder
 	store    store.Store // read-only ref for fetching data to embed
 	logger   *slog.Logger
+
+	// entityLocks serializes concurrent re-embed work for the same task
+	// or note. Without it, two events firing in quick succession for the
+	// same entity (e.g. UpdateTask × 2) could interleave their
+	// GetTask → DeleteTaskDocs → Upsert phases, letting the older
+	// write's Upsert overwrite the newer write's. Keyed by
+	// "task:<id>" / "note:<id>"; lazily-allocated *sync.Mutex per key.
+	entityLocks sync.Map
 }
 
 // New creates a VectorSyncer.
@@ -38,6 +47,53 @@ func New(vs vectorstore.VectorStore, embedder embed.Embedder, s store.Store, log
 		embedder: embedder,
 		store:    s,
 		logger:   logger.With("component", "vector-syncer"),
+	}
+}
+
+// taskLockKey / noteLockKey build the entityLocks keys. The keyspace is
+// shared via a string prefix so a task lock and a note lock with the same
+// numeric ID don't collide.
+func taskLockKey(id uint) string { return fmt.Sprintf("task:%d", id) }
+func noteLockKey(id uint) string { return fmt.Sprintf("note:%d", id) }
+
+// lockEntities acquires every key's mutex in sorted order (preventing
+// deadlock between concurrent callers with overlapping key sets) and
+// returns a release func that unlocks in reverse order. Duplicate keys
+// in the input are deduplicated to avoid self-deadlock. The release func
+// is safe to call exactly once via defer.
+//
+// Lazy *sync.Mutex allocation via sync.Map.LoadOrStore: under contention
+// the LoadOrStore returns the existing mutex; on a fresh key both
+// readers race on store and only one's allocation is kept. The wasted
+// allocation in the loser is negligible for our scale.
+func (v *VectorSyncer) lockEntities(keys []string) func() {
+	if len(keys) == 0 {
+		return func() {}
+	}
+	sorted := append(make([]string, 0, len(keys)), keys...)
+	sort.Strings(sorted)
+	// Dedup adjacent duplicates (post-sort).
+	j := 0
+	for i := 0; i < len(sorted); i++ {
+		if j > 0 && sorted[j-1] == sorted[i] {
+			continue
+		}
+		sorted[j] = sorted[i]
+		j++
+	}
+	sorted = sorted[:j]
+
+	unlocks := make([]func(), len(sorted))
+	for i, k := range sorted {
+		actual, _ := v.entityLocks.LoadOrStore(k, &sync.Mutex{})
+		mu := actual.(*sync.Mutex)
+		mu.Lock()
+		unlocks[i] = mu.Unlock
+	}
+	return func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
 	}
 }
 
@@ -72,7 +128,12 @@ func (v *VectorSyncer) syncTasks(ctx context.Context, event store.StoreEvent) er
 		return v.embedTasks(ctx, event.TaskIDs)
 
 	case "task.archived", "task.unarchived":
-		// Re-embed task (updates archived metadata) and all its notes
+		// Re-embed task (updates archived metadata) and all its notes.
+		// The two calls take different lock keyspaces (task: then note:)
+		// and release between phases, leaving an eventual-consistency
+		// window — a concurrent same-task event squeezing in between
+		// could land a partial state. Acceptable for best-effort sync;
+		// the next mutation re-embeds and converges.
 		if err := v.embedTasks(ctx, event.TaskIDs); err != nil {
 			return err
 		}
@@ -83,6 +144,15 @@ func (v *VectorSyncer) syncTasks(ctx context.Context, event store.StoreEvent) er
 		// removed here — note.deleted events handle that path explicitly when
 		// the caller passed delete_notes:true; otherwise notes are orphaned
 		// and stay in the index under their own doc ids.
+		// Hold the same per-task lock the embed paths use, so a slow
+		// concurrent embedTasks for the same id can't Upsert chunks
+		// AFTER our DeleteTaskDocs and resurrect a deleted task.
+		keys := make([]string, len(event.TaskIDs))
+		for i, tid := range event.TaskIDs {
+			keys[i] = taskLockKey(tid)
+		}
+		unlock := v.lockEntities(keys)
+		defer unlock()
 		for _, tid := range event.TaskIDs {
 			if err := v.vs.DeleteTaskDocs(ctx, tid); err != nil {
 				return err
@@ -106,6 +176,15 @@ func (v *VectorSyncer) syncNotes(ctx context.Context, event store.StoreEvent) er
 	case "note.created", "note.updated", "note.archived", "note.unarchived":
 		return v.embedNotes(ctx, event.NoteIDs)
 	case "note.deleted":
+		// Same lock-around-delete pattern as task.deleted: a concurrent
+		// embedNotes for the same id must not be able to Upsert chunks
+		// after our DeleteNoteDocs lands.
+		keys := make([]string, len(event.NoteIDs))
+		for i, nid := range event.NoteIDs {
+			keys[i] = noteLockKey(nid)
+		}
+		unlock := v.lockEntities(keys)
+		defer unlock()
 		for _, nid := range event.NoteIDs {
 			if err := v.vs.DeleteNoteDocs(ctx, nid); err != nil {
 				return err
@@ -118,6 +197,20 @@ func (v *VectorSyncer) syncNotes(ctx context.Context, event store.StoreEvent) er
 }
 
 func (v *VectorSyncer) embedTasks(ctx context.Context, taskIDs []uint) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	// Hold a per-task lock for the whole GetTask → DeleteTaskDocs →
+	// EmbedBatch → Upsert window so a concurrent embedTasks for the
+	// same task can't interleave and let an older write's Upsert
+	// overwrite a newer one.
+	keys := make([]string, len(taskIDs))
+	for i, tid := range taskIDs {
+		keys[i] = taskLockKey(tid)
+	}
+	unlock := v.lockEntities(keys)
+	defer unlock()
+
 	var docs []vectorstore.Document
 	var texts []string
 
@@ -175,6 +268,14 @@ func (v *VectorSyncer) embedNotes(ctx context.Context, noteIDs []uint) error {
 	if len(noteIDs) == 0 {
 		return nil
 	}
+	// Per-note serialization (see embedTasks for the rationale).
+	keys := make([]string, len(noteIDs))
+	for i, nid := range noteIDs {
+		keys[i] = noteLockKey(nid)
+	}
+	unlock := v.lockEntities(keys)
+	defer unlock()
+
 	notes, err := v.store.GetNotesByIDs(ctx, noteIDs)
 	if err != nil {
 		return fmt.Errorf("loading notes: %w", err)
