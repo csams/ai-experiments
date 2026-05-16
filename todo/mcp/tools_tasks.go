@@ -269,31 +269,34 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 
 	// update_task
 	srv.AddTool(mcpgo.NewTool("update_task",
-		mcpgo.WithDescription("Update a task's title, description, priority, or due date. " +
-			"Only provided fields are changed. Empty descriptions are omitted from the JSON response."),
+		mcpgo.WithDescription("Update a task's title, description, priority, or due date. "+
+			"Only provided fields are changed. Returns full task detail by default; pass `include` "+
+			"to restrict which expensive fields are loaded. Empty descriptions are omitted from the JSON response."),
 		mcpgo.WithNumber("task_id", mcpgo.Required(), mcpgo.Description("Task ID"), mcpgo.Min(1)),
 		mcpgo.WithString("title", mcpgo.Description("Task title (max 512 chars)"), mcpgo.MaxLength(512)),
 		mcpgo.WithString("description", mcpgo.Description("Task description (max 100000 chars)"), mcpgo.MaxLength(100000)),
 		mcpgo.WithNumber("priority", mcpgo.Description("Priority (lower number = higher importance, negative values allowed)")),
 		mcpgo.WithString("due_at", mcpgo.Description("Due date (YYYY-MM-DD)")),
 		mcpgo.WithBoolean("clear_due", mcpgo.Description("Remove due date (takes precedence over due_at if both provided)")),
+		mcpgo.WithArray("include",
+			mcpgo.Description("Optional fields to load on the returned task. Choices: description, notes, "+
+				"links, parent, children, blockers, blocking. Use \"*\" for all. "+
+				"Omit the parameter entirely to get full detail (the default). "+
+				"Passing an explicit empty array returns cheap fields only — that is a distinct request, not the default."),
+			mcpgo.WithStringItems(mcpgo.Enum(
+				"*", "description", "notes", "links", "parent", "children", "blockers", "blocking",
+			)),
+			mcpgo.MaxItems(8),
+		),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		id, err := requireUint(req, "task_id")
 		if err != nil {
 			return errResult(err), nil
 		}
-		args := req.GetArguments()
 		opts := store.UpdateTaskOptions{}
-		if v, ok := args["title"].(string); ok {
-			opts.Title = &v
-		}
-		if v, ok := args["description"].(string); ok {
-			opts.Description = &v
-		}
-		if v, ok := args["priority"].(float64); ok {
-			p := int(v)
-			opts.Priority = &p
-		}
+		opts.Title = getOptStr(req, "title")
+		opts.Description = getOptStr(req, "description")
+		opts.Priority = getOptInt(req, "priority")
 		if getBool(req, "clear_due") {
 			opts.ClearDueAt = true
 		} else {
@@ -306,11 +309,21 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 			}
 		}
 
-		task, err := s.UpdateTask(ctx, id, opts)
+		if _, err := s.UpdateTask(ctx, id, opts); err != nil {
+			return errResult(err), nil
+		}
+		inc := model.AllTaskIncludesSet()
+		if _, ok := req.GetArguments()["include"]; ok {
+			inc, err = resolveTaskIncludes(req, model.TaskIncludes)
+			if err != nil {
+				return errResult(err), nil
+			}
+		}
+		detail, err := s.GetTask(ctx, id, store.GetTaskOptions{Include: inc})
 		if err != nil {
 			return errResult(err), nil
 		}
-		return textResult(toJSON(task)), nil
+		return textResult(toJSON(detail)), nil
 	})
 
 	// set_task_state
@@ -367,7 +380,11 @@ func registerTaskTools(srv *server.MCPServer, s store.Store) {
 		if len(ids) > maxBulkMCPIDs {
 			return errResult(fmt.Errorf("ids: max %d per call", maxBulkMCPIDs)), nil
 		}
-		tasks, err := s.BulkUpdatePriority(ctx, ids, getInt(req, "priority"))
+		priority, err := req.RequireInt("priority")
+		if err != nil {
+			return errResult(fmt.Errorf("priority is required")), nil
+		}
+		tasks, err := s.BulkUpdatePriority(ctx, ids, priority)
 		if err != nil {
 			return errResult(err), nil
 		}

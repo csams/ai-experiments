@@ -28,11 +28,7 @@ func getStr(req mcpgo.CallToolRequest, key string) string {
 
 // getInt extracts an int argument, returns 0 if missing.
 func getInt(req mcpgo.CallToolRequest, key string) int {
-	args := req.GetArguments()
-	if v, ok := args[key].(float64); ok {
-		return int(v)
-	}
-	return 0
+	return req.GetInt(key, 0)
 }
 
 // getUint extracts a uint argument, returns 0 if missing or negative.
@@ -53,17 +49,18 @@ func getBool(req mcpgo.CallToolRequest, key string) bool {
 	return false
 }
 
-// getUintSlice extracts a []uint from a JSON array argument.
+// getUintSlice extracts a []uint from a JSON array argument. Unconvertible elements
+// are silently dropped (use requireUintSlice when strict validation is needed).
+// Filters out IDs < 1 — zero is invalid per schema Min(1).
 func getUintSlice(req mcpgo.CallToolRequest, key string) []uint {
-	args := req.GetArguments()
-	arr, ok := args[key].([]any)
-	if !ok {
+	ints := req.GetIntSlice(key, nil)
+	if ints == nil {
 		return nil
 	}
-	ids := make([]uint, 0, len(arr))
-	for _, v := range arr {
-		if f, ok := v.(float64); ok && f >= 0 {
-			ids = append(ids, uint(f))
+	ids := make([]uint, 0, len(ints))
+	for _, v := range ints {
+		if v >= 1 {
+			ids = append(ids, uint(v))
 		}
 	}
 	return ids
@@ -124,19 +121,27 @@ func requireStr(req mcpgo.CallToolRequest, key string) (string, error) {
 
 // requireUint extracts a required uint argument, returns error if missing or < 1.
 func requireUint(req mcpgo.CallToolRequest, key string) (uint, error) {
-	args := req.GetArguments()
-	v, ok := args[key].(float64)
-	if !ok || v < 1 {
+	v, err := req.RequireInt(key)
+	if err != nil || v < 1 {
 		return 0, fmt.Errorf("%s is required and must be a positive integer", key)
 	}
 	return uint(v), nil
 }
 
-// requireUintSlice extracts a required non-empty []uint argument.
+// requireUintSlice extracts a required non-empty []uint argument. Errors on the first
+// unconvertible element — use getUintSlice when silent-drop behavior is acceptable.
+// Returns an error if any element is < 1; zero is invalid per schema Min(1).
 func requireUintSlice(req mcpgo.CallToolRequest, key string) ([]uint, error) {
-	ids := getUintSlice(req, key)
-	if len(ids) == 0 {
+	ints, err := req.RequireIntSlice(key)
+	if err != nil || len(ints) == 0 {
 		return nil, fmt.Errorf("%s is required and must be a non-empty array", key)
+	}
+	ids := make([]uint, 0, len(ints))
+	for _, v := range ints {
+		if v < 1 {
+			return nil, fmt.Errorf("%s: each ID must be >= 1, got %d", key, v)
+		}
+		ids = append(ids, uint(v))
 	}
 	return ids, nil
 }
@@ -159,26 +164,32 @@ func getOptBool(req mcpgo.CallToolRequest, key string) *bool {
 	return nil
 }
 
-// getOptInt extracts a *int argument, returns nil if missing.
+// getOptInt extracts a *int argument, returns nil if missing or null.
+// Distinguishes "key absent → nil" from "key present with value 0 → &0".
 func getOptInt(req mcpgo.CallToolRequest, key string) *int {
 	args := req.GetArguments()
-	if v, ok := args[key].(float64); ok {
-		i := int(v)
-		return &i
+	val, ok := args[key]
+	if !ok || val == nil {
+		return nil
 	}
-	return nil
+	v := req.GetInt(key, 0)
+	return &v
 }
 
-// getOptUint extracts a *uint argument, returns nil if missing, non-numeric, or < 1.
-// This treats the schema's Min(1) as defense-in-depth; callers can rely on the
-// returned pointer always referring to a positive ID when non-nil.
+// getOptUint extracts a *uint argument, returns nil if missing, null, or < 1.
+// Callers can rely on the returned pointer always referring to a positive ID when non-nil.
 func getOptUint(req mcpgo.CallToolRequest, key string) *uint {
 	args := req.GetArguments()
-	if v, ok := args[key].(float64); ok && v >= 1 {
-		u := uint(v)
-		return &u
+	val, ok := args[key]
+	if !ok || val == nil {
+		return nil
 	}
-	return nil
+	v := req.GetInt(key, 0)
+	if v < 1 {
+		return nil
+	}
+	u := uint(v)
+	return &u
 }
 
 // getLinkInputs extracts an array of {type, url, description} objects from the

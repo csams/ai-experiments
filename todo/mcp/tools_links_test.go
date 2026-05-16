@@ -123,3 +123,39 @@ func TestUpdateLink_DescriptionCanBeExplicitlyCleared(t *testing.T) {
 		t.Errorf("description = %q, want empty (cleared)", got)
 	}
 }
+
+// TestAddLink_InvalidTypeRejected — mcp-go does not enforce Enum constraints
+// server-side; the handler is the primary validation gate.
+func TestAddLink_InvalidTypeRejected(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	task, _ := s.CreateTask(context.Background(), store.CreateTaskOptions{Title: "t"})
+	res := callTool(t, c, "add_link", map[string]any{
+		"task_id": float64(task.ID),
+		"type":    "invalid",
+		"url":     "https://example.com",
+	})
+	if !res.IsError {
+		t.Fatalf("expected error for invalid type; got: %s", resultText(t, res))
+	}
+	if !strings.Contains(resultText(t, res), "invalid link type") {
+		t.Errorf("error text = %q; want substring 'invalid link type'", resultText(t, res))
+	}
+}
+
+// TestUpdateLink_InvalidTypeRejected — empty-string type is caught first ("cannot be
+// cleared"); a non-empty invalid type reaches the new ValidLinkTypes check.
+func TestUpdateLink_InvalidTypeRejected(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	taskID, linkID := seedLink(t, s)
+	res := callTool(t, c, "update_link", map[string]any{
+		"task_id": float64(taskID),
+		"link_id": float64(linkID),
+		"type":    "invalid",
+	})
+	if !res.IsError {
+		t.Fatalf("expected error for invalid type; got: %s", resultText(t, res))
+	}
+	if !strings.Contains(resultText(t, res), "invalid link type") {
+		t.Errorf("error text = %q; want substring 'invalid link type'", resultText(t, res))
+	}
+}

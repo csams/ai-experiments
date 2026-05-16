@@ -82,6 +82,9 @@ func registerLinkTools(srv *server.MCPServer, s store.Store) {
 				return errResult(fmt.Errorf("type cannot be cleared; omit the key to leave it unchanged")), nil
 			}
 			lt := model.LinkType(*t)
+			if !model.ValidLinkTypes[lt] {
+				return errResult(fmt.Errorf("invalid link type %q (valid: jira, pr, url)", lt)), nil
+			}
 			opts.Type = &lt
 		}
 		if u := getOptStr(req, "url"); u != nil {

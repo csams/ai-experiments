@@ -287,6 +287,45 @@ func TestUpdateBlockers_OldToolsRemoved(t *testing.T) {
 	}
 }
 
+// TestUpdateTask_ReturnsFullTaskDetail verifies that update_task now returns
+// *model.TaskDetail (with associations) rather than the bare *model.Task that
+// store.UpdateTask returns. Regression guard for Plan B's GetTask post-mutation.
+func TestUpdateTask_ReturnsFullTaskDetail(t *testing.T) {
+	c, s := newMCPTestClient(t)
+	ctx := context.Background()
+
+	task, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "T"})
+	if _, err := s.AddNote(ctx, &task.ID, "a note"); err != nil {
+		t.Fatalf("add note: %v", err)
+	}
+	child, _ := s.CreateTask(ctx, store.CreateTaskOptions{Title: "child"})
+	if err := s.SetParent(ctx, child.ID, &task.ID); err != nil {
+		t.Fatalf("set parent: %v", err)
+	}
+
+	res := callTool(t, c, "update_task", map[string]any{
+		"task_id": float64(task.ID),
+		"title":   "T updated",
+	})
+	if res.IsError {
+		t.Fatalf("update_task errored: %s", resultText(t, res))
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res)), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// These keys are present only in TaskDetail, not in bare Task.
+	for _, k := range []string{"notes", "children"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("update_task response missing %q; got keys: %v (bare Task returned instead of TaskDetail)", k, got)
+		}
+	}
+	if got["title"] != "T updated" {
+		t.Errorf("title = %q, want %q", got["title"], "T updated")
+	}
+}
+
 // TestSetTaskArchived_MidArrayFailureRollsBackWholeBatch verifies the atomic
 // contract introduced in PR-3: when one ID fails, every prior ID in the array
 // is rolled back too. The previous broken behavior left an archived prefix

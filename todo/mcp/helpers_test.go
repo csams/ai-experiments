@@ -235,3 +235,135 @@ func TestGetLinkInputs_WrongTypeForURL(t *testing.T) {
 		t.Fatal("expected error for non-string url")
 	}
 }
+
+// --- requireUint ---
+
+func TestRequireUint_WithIntValue(t *testing.T) {
+	req := makeReq(map[string]any{"task_id": int(42)})
+	v, err := requireUint(req, "task_id")
+	if err != nil || v != 42 {
+		t.Errorf("requireUint(int(42)) = %v, %v; want 42, nil", v, err)
+	}
+}
+
+func TestRequireUint_WithFloat64Value(t *testing.T) {
+	req := makeReq(map[string]any{"task_id": float64(42)})
+	v, err := requireUint(req, "task_id")
+	if err != nil || v != 42 {
+		t.Errorf("requireUint(float64(42)) = %v, %v; want 42, nil", v, err)
+	}
+}
+
+func TestRequireUint_Missing(t *testing.T) {
+	req := makeReq(map[string]any{})
+	if _, err := requireUint(req, "task_id"); err == nil {
+		t.Error("requireUint on missing key must error")
+	}
+}
+
+func TestRequireUint_Zero(t *testing.T) {
+	req := makeReq(map[string]any{"task_id": float64(0)})
+	if _, err := requireUint(req, "task_id"); err == nil {
+		t.Error("requireUint(0) must error (must be >= 1)")
+	}
+}
+
+// --- getUintSlice / requireUintSlice ---
+
+func TestGetUintSlice_MixedTypes(t *testing.T) {
+	req := makeReq(map[string]any{"ids": []any{float64(1), int(2), "3"}})
+	got := getUintSlice(req, "ids")
+	if len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Errorf("getUintSlice mixed types = %v; want [1 2 3]", got)
+	}
+}
+
+func TestRequireUintSlice_Empty(t *testing.T) {
+	req := makeReq(map[string]any{"ids": []any{}})
+	if _, err := requireUintSlice(req, "ids"); err == nil {
+		t.Error("requireUintSlice on empty array must error")
+	}
+}
+
+func TestRequireUintSlice_UnconvertibleElement(t *testing.T) {
+	req := makeReq(map[string]any{"ids": []any{float64(1), "bad"}})
+	if _, err := requireUintSlice(req, "ids"); err == nil {
+		t.Error("requireUintSlice with unconvertible element must error")
+	}
+}
+
+func TestRequireUintSlice_ZeroIDRejected(t *testing.T) {
+	req := makeReq(map[string]any{"ids": []any{float64(1), float64(0), float64(2)}})
+	if _, err := requireUintSlice(req, "ids"); err == nil {
+		t.Error("requireUintSlice with ID=0 must error (strict: no silent drops)")
+	}
+}
+
+// --- getOptInt ---
+
+func TestGetOptInt_Absent(t *testing.T) {
+	req := makeReq(map[string]any{})
+	if getOptInt(req, "priority") != nil {
+		t.Error("absent key must return nil")
+	}
+}
+
+func TestGetOptInt_PresentZero(t *testing.T) {
+	req := makeReq(map[string]any{"priority": float64(0)})
+	v := getOptInt(req, "priority")
+	if v == nil || *v != 0 {
+		t.Errorf("present-zero must return &0, got %v", v)
+	}
+}
+
+func TestGetOptInt_PresentNull(t *testing.T) {
+	req := makeReq(map[string]any{"priority": nil})
+	if getOptInt(req, "priority") != nil {
+		t.Error("present-null must return nil")
+	}
+}
+
+// --- getOptUint ---
+
+func TestGetOptUint_Absent(t *testing.T) {
+	req := makeReq(map[string]any{})
+	if getOptUint(req, "parent_id") != nil {
+		t.Error("absent key must return nil")
+	}
+}
+
+func TestGetOptUint_PresentPositive(t *testing.T) {
+	req := makeReq(map[string]any{"parent_id": float64(5)})
+	v := getOptUint(req, "parent_id")
+	if v == nil || *v != 5 {
+		t.Errorf("present positive must return &5, got %v", v)
+	}
+}
+
+func TestGetOptUint_PresentZero(t *testing.T) {
+	req := makeReq(map[string]any{"parent_id": float64(0)})
+	if getOptUint(req, "parent_id") != nil {
+		t.Error("present-zero must return nil (below Min(1))")
+	}
+}
+
+func TestGetOptUint_PresentNull(t *testing.T) {
+	req := makeReq(map[string]any{"parent_id": nil})
+	if getOptUint(req, "parent_id") != nil {
+		t.Error("present-null must return nil")
+	}
+}
+
+// --- getOptStr ---
+
+func TestGetOptStr_AbsentVsEmpty(t *testing.T) {
+	absent := makeReq(map[string]any{})
+	if getOptStr(absent, "description") != nil {
+		t.Error("absent key must return nil")
+	}
+	present := makeReq(map[string]any{"description": ""})
+	v := getOptStr(present, "description")
+	if v == nil || *v != "" {
+		t.Errorf("present-empty must return &\"\", got %v", v)
+	}
+}
