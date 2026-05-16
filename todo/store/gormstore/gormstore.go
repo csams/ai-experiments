@@ -24,13 +24,31 @@ const defaultQueryLimit = 200
 
 var tagRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
+// defaultCloseDrainTimeout bounds the wait Close performs when the caller
+// passes a ctx with no deadline. Five seconds matches the HTTP-server
+// graceful-shutdown budget already used in cmd/mcp.go and is long enough
+// for typical audit / vector-sync work to land.
+const defaultCloseDrainTimeout = 5 * time.Second
+
 // GormStore implements store.Store using GORM.
 type GormStore struct {
 	db        *gorm.DB
 	observers []store.StoreObserver
-	mu        sync.RWMutex // protects observers slice
-	source    string       // "cli", "mcp-stdio", "mcp-http"
-	syncEmit  bool         // if true, call observers synchronously (for tests)
+	// mu protects observers, closed, and the wg.Add/closed-check critical
+	// section in emit. Read-side (emit) uses RLock; write-side (Close,
+	// AddObserver) uses Lock.
+	mu       sync.RWMutex
+	source   string // "cli", "mcp-stdio", "mcp-http"
+	syncEmit bool   // if true, call observers synchronously (for tests)
+
+	// wg tracks in-flight async observer callbacks. Drain (called from
+	// Close) waits on this so events emitted right before shutdown have
+	// a chance to land instead of being cancelled mid-flight.
+	wg sync.WaitGroup
+	// closed gates new async observer spawns once Close has run. Read
+	// under RLock together with the matching wg.Add so there is no
+	// Add/Wait race with Close.
+	closed bool
 }
 
 // New creates a GormStore, runs migrations, and returns it.
@@ -178,28 +196,102 @@ func (s *GormStore) DB() *gorm.DB {
 
 func (s *GormStore) emit(ctx context.Context, event store.StoreEvent) {
 	event.Source = s.source
+
+	// Read observers and reserve wg slots in the same RLock-protected
+	// region. This is what prevents the Add/Wait race with Close: Close
+	// takes the write lock to set closed=true and then calls wg.Wait, so
+	// any emit that observed closed=false and reached wg.Add was holding
+	// RLock at that moment — Close's Lock cannot have acquired yet, and
+	// once Close does set closed and runs Wait it will see the count
+	// reflecting our Add.
 	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return
+	}
 	observers := s.observers
+	asyncCount := 0
+	if !s.syncEmit {
+		asyncCount = len(observers)
+	}
+	if asyncCount > 0 {
+		s.wg.Add(asyncCount)
+	}
 	s.mu.RUnlock()
+
 	for _, o := range observers {
 		if s.syncEmit {
 			o.OnEvent(ctx, event)
-		} else {
-			go func(obs store.StoreObserver) {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("observer panic", "panic", r, "stack", string(debug.Stack()))
-					}
-				}()
-				obsCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				defer cancel()
-				obs.OnEvent(obsCtx, event)
-			}(o)
+			continue
 		}
+		go func(obs store.StoreObserver) {
+			defer s.wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("observer panic", "panic", r, "stack", string(debug.Stack()))
+				}
+			}()
+			obsCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			obs.OnEvent(obsCtx, event)
+		}(o)
+	}
+}
+
+// Drain blocks until all in-flight async observer callbacks have returned,
+// or until ctx is done. Returns ctx.Err() if the context fires first; nil
+// otherwise. Safe to call concurrently with mutations — newly emitted
+// events spawn observers that join the wait, although a caller that wants
+// a true quiescence point should typically close the input source first
+// (e.g. stop the HTTP server) before draining.
+//
+// Close calls Drain automatically — it uses the caller's deadline when one
+// is present, otherwise applies a 5 s default. Invoke Drain explicitly only
+// when you need to bound the wait without closing the store.
+func (s *GormStore) Drain(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
 func (s *GormStore) Close(ctx context.Context) error {
+	// Mark closed first under the write lock so concurrent emits observe
+	// it and short-circuit before spawning new observer goroutines.
+	s.mu.Lock()
+	alreadyClosed := s.closed
+	s.closed = true
+	s.mu.Unlock()
+
+	// Drain in-flight observers before tearing down the DB so audit and
+	// vector-sync work emitted right before shutdown isn't cancelled out
+	// from under its goroutines. Apply a sane default budget when the
+	// caller's ctx has no deadline; this prevents an unbounded hang in
+	// pathological shutdown paths.
+	drainCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		drainCtx, cancel = context.WithTimeout(context.Background(), defaultCloseDrainTimeout)
+		defer cancel()
+	}
+	if err := s.Drain(drainCtx); err != nil {
+		slog.Warn("observer drain timed out at close", "error", err)
+	}
+
+	// Second Close call: the wg was already drained on the first call;
+	// the DB may already be torn down. Skip the underlying close to
+	// avoid returning a confusing "sql: database is closed" error.
+	if alreadyClosed {
+		return nil
+	}
+
 	sqlDB, err := s.db.DB()
 	if err != nil {
 		return err

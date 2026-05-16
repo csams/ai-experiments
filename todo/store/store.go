@@ -93,6 +93,19 @@ type Store interface {
 	ArchiveNote(ctx context.Context, noteID uint, archived bool) error
 
 	// Lifecycle
+
+	// Drain blocks until all in-flight async observer callbacks have
+	// returned, or until ctx is done. Returns ctx.Err() if ctx is done
+	// first (cancellation or deadline); nil otherwise. Close calls Drain
+	// automatically — it uses the caller's deadline when one is present,
+	// otherwise applies a 5 s default — so callers do not normally need
+	// to invoke Drain themselves. The method is exposed for callers that
+	// want a flush checkpoint without closing the store.
+	Drain(ctx context.Context) error
+
+	// Close drains in-flight observers (see Drain) and then releases the
+	// underlying DB handle. Safe to call multiple times — only the first
+	// call closes the DB; subsequent calls drain only.
 	Close(ctx context.Context) error
 }
 
