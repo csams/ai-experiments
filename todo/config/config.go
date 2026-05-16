@@ -92,6 +92,13 @@ type VectorConfig struct {
 	Ollama   OllamaConfig   `yaml:"ollama" mapstructure:"ollama"`
 	OpenAI   OpenAIConfig   `yaml:"openai" mapstructure:"openai"`
 	PgVector PgVectorConfig `yaml:"pgvector" mapstructure:"pgvector"`
+
+	// Reconciler — applies only under `todo mcp` (the long-lived process).
+	// On each tick the reconciler drains up to ReconcileBatchSize dirty
+	// entities (tasks + notes) and re-embeds them. The dirty flag is
+	// cleared on successful re-embed.
+	ReconcileInterval  time.Duration `yaml:"reconcile_interval" mapstructure:"reconcile_interval"`
+	ReconcileBatchSize int           `yaml:"reconcile_batch_size" mapstructure:"reconcile_batch_size"`
 }
 
 type OllamaConfig struct {
@@ -161,6 +168,8 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("vector.ollama.model", "nomic-embed-text")
 	v.SetDefault("vector.ollama.url", "http://localhost:11434")
 	v.SetDefault("vector.openai.model", "text-embedding-3-small")
+	v.SetDefault("vector.reconcile_interval", "30s")
+	v.SetDefault("vector.reconcile_batch_size", 100)
 
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")

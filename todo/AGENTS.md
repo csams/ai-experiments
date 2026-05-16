@@ -263,9 +263,21 @@ vector:
     url: http://localhost:11434
 ```
 
-Requires Ollama running and PostgreSQL with the pgvector extension (`pgvector/pgvector:pg16` image). Use `todo vector reindex` to build/rebuild the index.
+Requires Ollama running and PostgreSQL with the pgvector extension (`pgvector/pgvector:pg16` image). Use `todo vector reindex` to build/rebuild the index from scratch.
 
 Vector search is only available with the PostgreSQL backend. When using SQLite, vector search is automatically disabled.
+
+### Failure recovery (`vector_dirty` reconciler)
+
+Real-time embed failures (embedder timeout, rate-limit, transient DB blip) are automatically recovered without operator intervention:
+
+1. `VectorSyncer.OnEvent` catches the failure and calls `Store.MarkVectorDirty` to flag the affected `tasks` / `notes` rows.
+2. Under `todo mcp`, a background goroutine started by `VectorSyncer.StartReconciler` wakes every `vector.reconcile_interval` (default 30s) and drains up to `vector.reconcile_batch_size` (default 100) dirty rows per tick.
+3. Each batch flows through the normal `embedTasks` / `embedNotes` paths, so per-entity locks still apply and a concurrent fresh update for the same entity serializes correctly.
+4. On successful re-embed the dirty flag is cleared inside `embedTasks` / `embedNotes`.
+5. If the batch still fails, the flag stays set and the next tick retries.
+
+Short-lived CLI commands (`todo task create`, etc.) don't run the reconciler — they just write the flag if a sync fails. The next `todo mcp` boot picks up the accumulated dirty rows. The `task.deleted` and `note.deleted` paths intentionally don't mark anything (the entity is gone; only `todo vector reindex` can clean orphan chunks from a failed delete).
 
 A task's embedding text includes its title, description, tags, link descriptions, priority, and state. Notes are embedded as separate documents (both attached and standalone notes appear in `semantic_search` results). Link `description` content is therefore searchable via `semantic_search`; URLs and link types are not embedded. Adding/updating/deleting a link automatically re-embeds its parent task. Reparenting a note re-embeds the note (with new `task_id` metadata) but does not re-embed any task, since task embeddings do not include note text.
 

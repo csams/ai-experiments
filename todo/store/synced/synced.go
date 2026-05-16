@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/csams/todo/embed"
 	"github.com/csams/todo/embed/chunker"
@@ -38,6 +39,15 @@ type VectorSyncer struct {
 	// write's Upsert overwrite the newer write's. Keyed by
 	// "task:<id>" / "note:<id>"; lazily-allocated *sync.Mutex per key.
 	entityLocks sync.Map
+
+	// Reconciler lifecycle. StartReconciler is non-blocking and idempotent;
+	// StopReconciler cancels the goroutine and waits for it to exit. Long-
+	// lived processes (the MCP server) start the reconciler at boot;
+	// short-lived CLI commands don't bother — dirty rows persist in the DB
+	// and get picked up by the next MCP-server tick.
+	reconcilerMu     sync.Mutex
+	reconcilerCancel context.CancelFunc
+	reconcilerDone   chan struct{}
 }
 
 // New creates a VectorSyncer.
@@ -98,7 +108,9 @@ func (v *VectorSyncer) lockEntities(keys []string) func() {
 }
 
 // OnEvent handles store events and syncs to the vector store.
-// This is best-effort: failures are logged but do not propagate.
+// This is best-effort: failures are logged but do not propagate. On
+// failure, affected entities are marked vector_dirty so the reconciler
+// can re-embed them later.
 func (v *VectorSyncer) OnEvent(ctx context.Context, event store.StoreEvent) {
 	var err error
 	switch {
@@ -113,9 +125,9 @@ func (v *VectorSyncer) OnEvent(ctx context.Context, event store.StoreEvent) {
 		v.logger.Warn("vector sync failed",
 			"event", event.Type,
 			"task_ids", event.TaskIDs,
+			"note_ids", event.NoteIDs,
 			"error", err,
 		)
-		// Mark dirty for later reindex
 		v.markDirty(ctx, event)
 	}
 }
@@ -261,7 +273,18 @@ func (v *VectorSyncer) embedTasks(ctx context.Context, taskIDs []uint) error {
 		docs[i].Vector = vecs[i]
 	}
 
-	return v.vs.Upsert(ctx, docs)
+	if err := v.vs.Upsert(ctx, docs); err != nil {
+		return err
+	}
+	// Clear the dirty flag on every input ID. Tasks that were skipped
+	// inside the GetTask loop (deleted mid-flight) match zero rows, so
+	// the clear is a safe no-op for those.
+	if err := v.store.ClearVectorDirty(ctx, taskIDs, nil); err != nil {
+		// Non-fatal: the embed succeeded; the worst that happens is the
+		// reconciler re-processes these IDs on the next tick.
+		v.logger.Warn("clear task dirty flag after embed failed", "error", err)
+	}
+	return nil
 }
 
 func (v *VectorSyncer) embedNotes(ctx context.Context, noteIDs []uint) error {
@@ -369,7 +392,13 @@ func (v *VectorSyncer) embedNotes(ctx context.Context, noteIDs []uint) error {
 		docs[i].Vector = vecs[i]
 	}
 
-	return v.vs.Upsert(ctx, docs)
+	if err := v.vs.Upsert(ctx, docs); err != nil {
+		return err
+	}
+	if err := v.store.ClearVectorDirty(ctx, nil, noteIDs); err != nil {
+		v.logger.Warn("clear note dirty flag after embed failed", "error", err)
+	}
+	return nil
 }
 
 // reembedTaskNotes re-embeds all notes for the given tasks, updating their metadata.
@@ -391,14 +420,145 @@ func (v *VectorSyncer) reembedTaskNotes(ctx context.Context, taskIDs []uint) err
 	return v.embedNotes(ctx, allNoteIDs)
 }
 
-// markDirty logs a warning when vector sync fails so operators know to reindex.
-// TODO: Implement full recovery by setting VectorDirty=true on affected records
-// (model.Task.VectorDirty, model.Note.VectorDirty) and auto-retrying.
-func (v *VectorSyncer) markDirty(_ context.Context, event store.StoreEvent) {
-	v.logger.Warn("vector sync failed for entities; run 'todo vector reindex' to recover",
-		"task_ids", event.TaskIDs,
-		"note_ids", event.NoteIDs,
-	)
+// markDirty flags the affected entities so the reconciler will re-embed
+// them on a later tick. Skipped for *.deleted events: the entity is gone
+// from the relational store, so marking a non-existent row is a no-op,
+// and the vector chunks (if any survived the failed delete) are orphans
+// that only `todo vector reindex` can clean up. We still log so operators
+// know a manual reindex may be warranted in those rare cases.
+func (v *VectorSyncer) markDirty(ctx context.Context, event store.StoreEvent) {
+	if event.Type == "task.deleted" || event.Type == "note.deleted" {
+		v.logger.Warn("vector delete failed; run 'todo vector reindex' to clean orphans",
+			"event", event.Type,
+			"task_ids", event.TaskIDs,
+			"note_ids", event.NoteIDs,
+		)
+		return
+	}
+	if err := v.store.MarkVectorDirty(ctx, event.TaskIDs, event.NoteIDs); err != nil {
+		// MarkVectorDirty failed too — typically because the same DB
+		// outage that caused the sync failure is still in play. Log so
+		// the operator knows a manual reindex may be needed once the DB
+		// comes back.
+		v.logger.Warn("could not mark dirty after vector sync failure; run 'todo vector reindex' to recover",
+			"event", event.Type,
+			"task_ids", event.TaskIDs,
+			"note_ids", event.NoteIDs,
+			"error", err,
+		)
+	}
+}
+
+// StartReconciler kicks off a background goroutine that periodically
+// drains dirty entities and re-embeds them. Safe to call once per
+// VectorSyncer lifetime — subsequent calls are no-ops while a reconciler
+// is already running. Callers must invoke StopReconciler before tearing
+// down the store; see cmd/mcp.go for the wiring.
+//
+// interval bounds how often the reconciler wakes. batchSize bounds the
+// per-tick work; pass 0 for the default (100).
+func (v *VectorSyncer) StartReconciler(parent context.Context, interval time.Duration, batchSize int) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+	v.reconcilerMu.Lock()
+	defer v.reconcilerMu.Unlock()
+	if v.reconcilerCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	v.reconcilerCancel = cancel
+	v.reconcilerDone = done
+	// Pass `done` as a parameter rather than reading v.reconcilerDone
+	// from the goroutine's defer — StopReconciler nils the field, and
+	// closing a nil channel panics.
+	go v.runReconciler(ctx, done, interval, batchSize)
+	v.logger.Info("vector reconciler started", "interval", interval, "batch_size", batchSize)
+}
+
+// StopReconciler signals the reconciler to exit and waits up to ctx's
+// deadline for the goroutine to return. Idempotent.
+//
+// The struct fields are NOT nilled until the goroutine has actually
+// exited. A concurrent StartReconciler arriving while Stop is waiting
+// will see non-nil reconcilerCancel and become a no-op, which is the
+// correct behavior — restart-after-stop isn't a supported pattern, and
+// allowing it would risk two goroutines briefly co-existing.
+func (v *VectorSyncer) StopReconciler(ctx context.Context) {
+	v.reconcilerMu.Lock()
+	cancel := v.reconcilerCancel
+	done := v.reconcilerDone
+	v.reconcilerMu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			v.logger.Warn("vector reconciler shutdown timed out", "error", ctx.Err())
+			// Don't clear the fields below — the goroutine is still
+			// running. A concurrent Start would observe non-nil cancel
+			// and stay a no-op, which is the safer failure mode than
+			// allowing a second goroutine to spawn.
+			return
+		}
+	}
+	// Goroutine has exited. Clear fields under the lock so any
+	// future Start (after a clean shutdown) can spawn a fresh one.
+	v.reconcilerMu.Lock()
+	v.reconcilerCancel = nil
+	v.reconcilerDone = nil
+	v.reconcilerMu.Unlock()
+}
+
+func (v *VectorSyncer) runReconciler(ctx context.Context, done chan struct{}, interval time.Duration, batchSize int) {
+	defer close(done)
+	// Fire one tick immediately on startup so dirty rows accumulated
+	// while the process was down get cleared promptly. Subsequent ticks
+	// follow the interval.
+	v.reconcileOnce(ctx, batchSize)
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			v.reconcileOnce(ctx, batchSize)
+			timer.Reset(interval)
+		}
+	}
+}
+
+// reconcileOnce drains one batch of dirty entities through the normal
+// embed paths. On success the dirty flag is cleared inside embedTasks /
+// embedNotes. On failure the flag stays set, so the next tick retries.
+func (v *VectorSyncer) reconcileOnce(ctx context.Context, batchSize int) {
+	taskIDs, noteIDs, err := v.store.ListVectorDirty(ctx, batchSize)
+	if err != nil {
+		v.logger.Warn("reconciler list failed", "error", err)
+		return
+	}
+	if len(taskIDs) == 0 && len(noteIDs) == 0 {
+		return
+	}
+	v.logger.Info("vector reconciler processing batch", "tasks", len(taskIDs), "notes", len(noteIDs))
+	if len(taskIDs) > 0 {
+		if err := v.embedTasks(ctx, taskIDs); err != nil {
+			v.logger.Warn("reconciler embed tasks failed", "task_ids", taskIDs, "error", err)
+		}
+	}
+	if len(noteIDs) > 0 {
+		if err := v.embedNotes(ctx, noteIDs); err != nil {
+			v.logger.Warn("reconciler embed notes failed", "note_ids", noteIDs, "error", err)
+		}
+	}
 }
 
 // chunkInput is one prepared chunk ready for embedding.

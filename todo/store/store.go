@@ -101,6 +101,22 @@ type Store interface {
 	DeleteNote(ctx context.Context, noteID uint) error
 	ArchiveNote(ctx context.Context, noteID uint, archived bool) error
 
+	// Vector-sync recovery — see store/synced.VectorSyncer's reconciler.
+	//
+	// MarkVectorDirty flags the given tasks and notes as having a
+	// potentially stale vector-store embedding. Idempotent and best-
+	// effort: a DB failure during the mark itself is logged by the
+	// caller, not returned (so a callsite that's already in a failure
+	// path doesn't compound the damage).
+	MarkVectorDirty(ctx context.Context, taskIDs, noteIDs []uint) error
+	// ListVectorDirty returns up to `limit` task IDs and `limit` note
+	// IDs that currently carry the dirty flag. Returns both slices
+	// non-nil but possibly empty.
+	ListVectorDirty(ctx context.Context, limit int) (taskIDs, noteIDs []uint, err error)
+	// ClearVectorDirty unsets the dirty flag for the given IDs. Called
+	// by the reconciler after a successful re-embed. Idempotent.
+	ClearVectorDirty(ctx context.Context, taskIDs, noteIDs []uint) error
+
 	// Lifecycle
 
 	// Drain blocks until all in-flight async observer callbacks have

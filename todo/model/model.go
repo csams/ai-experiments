@@ -48,7 +48,13 @@ type Task struct {
 	Archived    bool       `gorm:"not null;default:false" json:"archived"`
 	DueAt       *time.Time `json:"due_at,omitempty"`
 	ParentID    *uint      `json:"parent_id,omitempty"`
-	VectorDirty bool       `gorm:"not null;default:false" json:"-"`
+	// VectorDirty marks a row whose vector-store embedding may be stale
+	// because the most recent sync attempt failed. The reconciler in
+	// store/synced periodically scans for dirty rows and re-embeds them,
+	// clearing the flag on success. Indexed because the reconciler's
+	// poll query filters on it and the population of dirty rows is
+	// expected to be sparse (failure is rare).
+	VectorDirty bool `gorm:"not null;default:false;index" json:"-"`
 
 	Parent     *Task       `gorm:"foreignKey:ParentID" json:"parent,omitempty"`
 	Children   []Task      `gorm:"foreignKey:ParentID" json:"children,omitempty"`
@@ -122,7 +128,7 @@ type Note struct {
 	TaskID      *uint     `gorm:"index" json:"task_id,omitempty"`
 	Text        string    `gorm:"not null" json:"text"`
 	Archived    bool      `gorm:"not null;default:false" json:"archived"`
-	VectorDirty bool      `gorm:"not null;default:false" json:"-"`
+	VectorDirty bool      `gorm:"not null;default:false;index" json:"-"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

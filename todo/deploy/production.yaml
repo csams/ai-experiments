@@ -16,6 +16,10 @@ vector:
   ollama:
     model: nomic-embed-text
     url: http://host.containers.internal:11434  # host.containers.internal resolves to the host from within podman containers
+  # Background reconciler — re-embeds entities whose last sync attempt
+  # failed (vector_dirty flag set on the row). Only runs under `todo mcp`.
+  reconcile_interval: 30s
+  reconcile_batch_size: 100
 
 logging:
   level: info

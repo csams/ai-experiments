@@ -105,13 +105,11 @@ func migrateNotesTaskIDNullable(db *gorm.DB) error {
 		if err := db.Raw("PRAGMA table_info(notes)").Scan(&cols).Error; err != nil {
 			return fmt.Errorf("sqlite table_info: %w", err)
 		}
-		var taskIDNotNull, hasVectorDirty bool
+		var taskIDNotNull bool
 		for _, c := range cols {
 			if c.Name == "task_id" && c.NotNull == 1 {
 				taskIDNotNull = true
-			}
-			if c.Name == "vector_dirty" {
-				hasVectorDirty = true
+				break
 			}
 		}
 		if !taskIDNotNull {
@@ -130,20 +128,20 @@ func migrateNotesTaskIDNullable(db *gorm.DB) error {
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				task_id INTEGER,
 				text TEXT NOT NULL,
-				vector_dirty INTEGER NOT NULL DEFAULT 0,
 				created_at DATETIME
 			)`).Error; err != nil {
 				return fmt.Errorf("create notes_new: %w", err)
 			}
-			var copyStmt string
-			if hasVectorDirty {
-				copyStmt = `INSERT INTO notes_new (id, task_id, text, vector_dirty, created_at)
-					SELECT id, task_id, text, COALESCE(vector_dirty, 0), created_at FROM notes`
-			} else {
-				copyStmt = `INSERT INTO notes_new (id, task_id, text, created_at)
-					SELECT id, task_id, text, created_at FROM notes`
-			}
-			if err := tx.Exec(copyStmt).Error; err != nil {
+			// Legacy notes rows may carry a `vector_dirty` column from
+			// before the dirty-flag retry path was reconsidered. We drop
+			// it on the way through by simply not enumerating it in the
+			// SELECT — AutoMigrate (which runs after this migration) re-
+			// creates `vector_dirty` per the model with default false.
+			// That's the correct post-state: we don't preserve stale
+			// dirty state across the rebuild, and AutoMigrate keeps the
+			// schema aligned with the model.
+			if err := tx.Exec(`INSERT INTO notes_new (id, task_id, text, created_at)
+				SELECT id, task_id, text, created_at FROM notes`).Error; err != nil {
 				return fmt.Errorf("copy rows: %w", err)
 			}
 			if err := tx.Exec("DROP TABLE notes").Error; err != nil {
@@ -2856,6 +2854,87 @@ func (s *GormStore) DeleteCheckpoint(ctx context.Context, taskID uint) error {
 		Type:    "checkpoint.deleted",
 		TaskIDs: []uint{taskID},
 	})
+	return nil
+}
+
+// --- Vector-sync dirty-flag recovery ---
+
+// dirtyListMaxBatch caps the per-call result size from ListVectorDirty.
+// Callers (the reconciler) pass their own batchSize via `limit`; this is
+// just a defense-in-depth ceiling so a buggy caller can't ask for a
+// million rows in one query.
+const dirtyListMaxBatch = 1000
+
+func (s *GormStore) MarkVectorDirty(ctx context.Context, taskIDs, noteIDs []uint) error {
+	if len(taskIDs) == 0 && len(noteIDs) == 0 {
+		return nil
+	}
+	db := s.db.WithContext(ctx)
+	// Two independent UPDATEs; neither touches the other table, so a single
+	// transaction adds no value beyond logical grouping. Keep them flat.
+	if len(taskIDs) > 0 {
+		if err := db.Model(&model.Task{}).
+			Where("id IN ?", taskIDs).
+			Update("vector_dirty", true).Error; err != nil {
+			return fmt.Errorf("mark tasks dirty: %w", err)
+		}
+	}
+	if len(noteIDs) > 0 {
+		if err := db.Model(&model.Note{}).
+			Where("id IN ?", noteIDs).
+			Update("vector_dirty", true).Error; err != nil {
+			return fmt.Errorf("mark notes dirty: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *GormStore) ListVectorDirty(ctx context.Context, limit int) ([]uint, []uint, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > dirtyListMaxBatch {
+		limit = dirtyListMaxBatch
+	}
+	db := s.db.WithContext(ctx)
+	taskIDs := make([]uint, 0)
+	if err := db.Model(&model.Task{}).
+		Where("vector_dirty = ?", true).
+		Order("id ASC").
+		Limit(limit).
+		Pluck("id", &taskIDs).Error; err != nil {
+		return nil, nil, fmt.Errorf("list dirty tasks: %w", err)
+	}
+	noteIDs := make([]uint, 0)
+	if err := db.Model(&model.Note{}).
+		Where("vector_dirty = ?", true).
+		Order("id ASC").
+		Limit(limit).
+		Pluck("id", &noteIDs).Error; err != nil {
+		return nil, nil, fmt.Errorf("list dirty notes: %w", err)
+	}
+	return taskIDs, noteIDs, nil
+}
+
+func (s *GormStore) ClearVectorDirty(ctx context.Context, taskIDs, noteIDs []uint) error {
+	if len(taskIDs) == 0 && len(noteIDs) == 0 {
+		return nil
+	}
+	db := s.db.WithContext(ctx)
+	if len(taskIDs) > 0 {
+		if err := db.Model(&model.Task{}).
+			Where("id IN ?", taskIDs).
+			Update("vector_dirty", false).Error; err != nil {
+			return fmt.Errorf("clear tasks dirty: %w", err)
+		}
+	}
+	if len(noteIDs) > 0 {
+		if err := db.Model(&model.Note{}).
+			Where("id IN ?", noteIDs).
+			Update("vector_dirty", false).Error; err != nil {
+			return fmt.Errorf("clear notes dirty: %w", err)
+		}
+	}
 	return nil
 }
 

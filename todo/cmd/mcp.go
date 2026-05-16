@@ -30,6 +30,22 @@ HTTP streamable transport (for remote / multi-client access).`,
 		}
 		defer s.Close(cmd.Context())
 
+		// Start the vector-sync reconciler if vector sync is configured.
+		// The reconciler is gated to long-lived processes (the MCP
+		// server) — short-lived CLI commands don't run it; dirty rows
+		// persist in the DB until the next MCP-server tick.
+		//
+		// Deferred-in-reverse: StopReconciler runs BEFORE s.Close so
+		// the reconciler can't issue store reads against a closed DB.
+		if syncer := getVectorSyncer(); syncer != nil {
+			syncer.StartReconciler(cmd.Context(), cfg.Vector.ReconcileInterval, cfg.Vector.ReconcileBatchSize)
+			defer func() {
+				stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				syncer.StopReconciler(stopCtx)
+			}()
+		}
+
 		// Set source for audit logging
 		transport, _ := cmd.Flags().GetString("transport")
 		switch transport {
